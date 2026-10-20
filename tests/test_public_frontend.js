@@ -77,24 +77,30 @@ test("a superseded list response cannot replace newer filtered results",async()=
   releaseOld(response(snapshot([row(1,"Old result")])));
   await oldRequest;
   assert.equal(app.get("public-rows").children[0].children[2].textContent,"New result");
-  assert.equal(app.get("public-refresh").disabled,false);
+  assert.equal(app.run("loading"),false);
+  assert.equal(app.get("public-select-page").disabled,false);
   assert.equal(app.get("public-notice").hidden,true);
   assert.match(app.requests.at(-1).url,/^\/desk\/api\/public\/configs\?/);
 });
 
 test("superseded failures neither show errors nor unlock the active request",async()=>{
   const app=await loadPublic();
+  app.set("fixture",snapshot([row(1)])); app.run("render(fixture)");
   const pending=[];
   app.setHandler(()=>new Promise(resolve=>pending.push(resolve)));
   const oldRequest=app.run("load()");
   const currentRequest=app.run("load()");
   pending[0](response({},500));
   await oldRequest;
-  assert.equal(app.get("public-refresh").disabled,true);
+  assert.equal(app.run("loading"),true);
+  assert.equal(app.get("public-select-page").disabled,true);
+  assert.equal(app.get("public-rows").querySelectorAll("input[type=checkbox]")[0].disabled,true);
   assert.equal(app.get("public-notice").hidden,true);
   pending[1](response(snapshot([row(1)])));
   await currentRequest;
-  assert.equal(app.get("public-refresh").disabled,false);
+  assert.equal(app.run("loading"),false);
+  assert.equal(app.get("public-select-page").disabled,false);
+  assert.equal(app.get("public-rows").querySelectorAll("input[type=checkbox]")[0].disabled,false);
 });
 
 test("untrusted names are plain text in the row and copy label",async()=>{
