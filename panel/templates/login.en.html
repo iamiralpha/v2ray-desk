@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sign in · V2Ray Desk</title>
+  <link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}">
+  <link rel="icon" href="{{ url_for('static',filename='icon.svg') }}" type="image/svg+xml">
+</head>
+<body class="login-page">
+  <main class="login-card">
+    <div class="brand-mark">V<span>2</span></div>
+    <a class="language-switch" href="{{ url_for('login', lang='fa') }}" lang="fa">فارسی</a><p class="eyebrow">V2RAY DESK / PRIVATE PANEL</p>
+    <h1>All your connections,<br>one workspace.</h1>
+    <p class="muted">Sign in to your private configuration dashboard.</p>
+    <form method="post" action="{{ url_for('login') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label for="password">Password</label>
+      <input id="password" type="password" name="password" autocomplete="current-password" required autofocus maxlength="128">
+      {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+      <button class="primary full" type="submit">Sign in <span aria-hidden="true">←</span></button>
+    </form>
+    <div class="login-note"><span class="dot"></span> Private management · Real connection testing</div>
+  </main>
+  <div class="login-art" aria-hidden="true"><div class="orbit one"></div><div class="orbit two"></div><div class="orbit three"></div><span>A better connection<br>starts with a real test.</span><small>MEASURE. ORGANIZE. CONNECT.</small></div>
+</body>
+</html>
