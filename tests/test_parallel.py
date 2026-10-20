@@ -18,7 +18,8 @@ def wait_until(predicate, timeout=5):
         time.sleep(.01)
 
 
-def test_ten_thousand_queue_is_parallel_bounded_and_cancellable(client, monkeypatch):
+@pytest.mark.parametrize("workers", [8, 100, 128])
+def test_ten_thousand_queue_is_parallel_bounded_and_cancellable(client, monkeypatch, workers):
     manager = client.application.extensions["tester"]
     monkeypatch.setattr(tester.shutil, "which", lambda _: "/xray")
     with connect(manager.db_path) as db:
@@ -32,24 +33,84 @@ def test_ten_thousand_queue_is_parallel_bounded_and_cancellable(client, monkeypa
     def fake(uri, executable, stop, **options):
         with guard:
             entered.append(options)
-        assert release.wait(10)
+        assert release.wait(20)
         return tester.result("error" if stop.is_set() else "healthy")
     manager.probe_function = fake
-    manager.start(ids, {"workers": 8, "samples": 2, "timeout": 4})
+    manager.start(ids, {"workers": workers, "samples": 2, "timeout": 4})
     try:
-        wait_until(lambda: len(entered) == 8)
+        wait_until(lambda: len(entered) == workers, timeout=10)
         snapshot = manager.snapshot()
-        assert snapshot["active"] == 8 and snapshot["queued"] == 9992
+        assert snapshot["active"] == workers and snapshot["queued"] == 10000 - workers
         assert all(o["samples"] == 2 and o["timeout"] == 4 for o in entered)
         changes = client.get("/api/configs?cursor=" + initial["cursor"]).json
-        assert not changes["full"] and len(changes["configs"]) == 8
+        assert not changes["full"] and len(changes["configs"]) == workers
+    finally:
         manager.cancel()
+        release.set()
+    wait_until(lambda: not manager.snapshot()["running"], timeout=10)
+    assert len(entered) == workers
+    assert manager.snapshot()["done"] == workers and manager.snapshot()["active"] == 0
+    with connect(manager.db_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM configs WHERE status='pending'").fetchone()[0] == 10000 - workers
+        assert db.execute("SELECT COUNT(*) FROM configs WHERE status='error' AND checked_at IS NOT NULL").fetchone()[0] == workers
+
+
+def test_hundred_workers_persist_results_across_bounded_shared_batches(client, monkeypatch):
+    manager = client.application.extensions["tester"]
+    with connect(manager.db_path) as db:
+        db.executemany("""INSERT INTO configs(uri,name,protocol,host,port,fingerprint)
+            VALUES (?,?, 'vless','example.com',443,?)""", [(LINK, str(i), str(i)) for i in range(300)])
+        ids = [row[0] for row in db.execute("SELECT id FROM configs ORDER BY id")]
+    entered = []
+    batches = []
+    release = threading.Event()
+    guard = threading.Lock()
+    active = peak = active_cores = peak_cores = 0
+
+    @contextmanager
+    def core(prepared, executable, stop):
+        nonlocal active_cores, peak_cores
+        active_cores += 1
+        peak_cores = max(peak_cores, active_cores)
+        batches.append(len(prepared))
+        try:
+            yield {row["id"]: 10000 + row["id"] for row in prepared}
+        finally:
+            active_cores -= 1
+
+    def probe(port, stop, **options):
+        nonlocal active, peak
+        with guard:
+            entered.append(port)
+            active += 1
+            peak = max(peak, active)
+        try:
+            assert release.wait(20)
+            return tester.result("healthy", latency_ms=port, successes=2, samples=2)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(tester.shutil, "which", lambda _: "/xray")
+    monkeypatch.setattr(tester, "public_address", lambda *args: "1.1.1.1")
+    monkeypatch.setattr(tester, "shared_core", core)
+    monkeypatch.setattr(tester, "probe_connection", probe)
+    manager.start(ids, {"workers": 100, "country": False, "gemini": False})
+    try:
+        wait_until(lambda: len(entered) == 100, timeout=10)
+        assert manager.snapshot()["active"] == 100
+        assert manager.snapshot()["queued"] == 200
     finally:
         release.set()
-    wait_until(lambda: not manager.snapshot()["running"])
-    assert len(entered) == 8
+    wait_until(lambda: not manager.snapshot()["running"], timeout=15)
+    assert peak == 100 and active == 0
+    assert len(entered) == len(set(entered)) == 300
+    assert batches == [128, 128, 44] and peak_cores == 1 and active_cores == 0
+    assert manager.snapshot()["done"] == 300
     with connect(manager.db_path) as db:
-        assert db.execute("SELECT COUNT(*) FROM configs WHERE status='pending'").fetchone()[0] == 9992
+        rows = db.execute("SELECT id,status,latency_ms,samples,successes FROM configs ORDER BY id").fetchall()
+    assert all(row["status"] == "healthy" and row["latency_ms"] == 10000 + row["id"]
+               and row["samples"] == row["successes"] == 2 for row in rows)
 
 
 def test_completed_results_are_not_held_behind_slow_first_worker(client, monkeypatch):
@@ -110,7 +171,7 @@ def test_bad_host_does_not_abandon_valid_batch_neighbor(client, monkeypatch, fai
     assert rows[1]["status"] == "healthy"
 
 
-@pytest.mark.parametrize("options", [{"workers": 0}, {"workers": 33}, {"workers": True},
+@pytest.mark.parametrize("options", [{"workers": 0}, {"workers": 129}, {"workers": True},
                                     {"timeout": 100}, {"samples": 3}, {"target": []},
                                     {"target": "http://127.0.0.1"}, {"gemini": "yes"}, []])
 def test_invalid_options_are_rejected(client, options):

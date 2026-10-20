@@ -38,6 +38,17 @@ def test_engine_accepts_generated_config(tmp_path, protocol, transport):
     assert completed.returncode == 0, completed.stdout.decode(errors="replace")
 
 
+def test_engine_accepts_128_node_shared_core(tmp_path):
+    parsed = parse_uri(f"vless://{UUID}@example.com:443?security=tls&type=tcp")
+    prepared = [{"id": index, "parsed": parsed, "address": "1.1.1.1", "port": 20000 + index}
+                for index in range(128)]
+    path = tmp_path / "shared-128.json"
+    path.write_text(json.dumps(tester.make_batch_config(prepared)))
+    # Validation starts no listeners and generates no outbound traffic.
+    completed = subprocess.run([XRAY, "run", "-test", "-c", str(path)], capture_output=True, timeout=10)
+    assert completed.returncode == 0, completed.stdout.decode(errors="replace")
+
+
 @pytest.fixture
 def real_proxy(tmp_path, monkeypatch):
     class Handler(BaseHTTPRequestHandler):

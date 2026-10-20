@@ -151,7 +151,7 @@ def test_auth_and_csrf(client):
     assert client.post("/api/delete", json={"ids": [1]}).status_code == 403
     visitor = client.application.test_client()
     assert visitor.get("/api/configs").status_code == 401
-    assert visitor.get("/").status_code == 302
+    assert visitor.get("/").status_code == 200
     assert client.get("/").headers["X-Frame-Options"] == "DENY"
 
 

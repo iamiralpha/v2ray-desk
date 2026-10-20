@@ -5,9 +5,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import time
 import socketserver
+import ssl
 import warnings
 
 import aiohttp
+from aiohttp_socks import ProxyConnectionError
 import pytest
 
 from panel import delay
@@ -38,13 +40,23 @@ def endpoint(monkeypatch):
         protocol_version = "HTTP/1.1"
         def do_GET(self):
             events.append((self.client_address, time.monotonic(), self.path))
+            if self.path == "/redirect-then-stall":
+                self.send_response(302)
+                self.send_header("Location", "/stall")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if self.path == "/stall" or (self.path == "/403-then-stall" and len(events) > 1):
+                time.sleep(.6)
+                self.close_connection = True
+                return
             if self.path == "/broken" and len(events) == 2:
                 self.connection.shutdown(2)
                 self.connection.close()
                 return
             time.sleep(.09 if len(events) == 1 else .025)
             slow = self.path == "/slow"
-            self.send_response(403 if self.path == "/403" else 200)
+            self.send_response(403 if self.path in {"/403", "/403-then-stall"} else 200)
             self.send_header("Content-Length", "20" if slow else "1")
             self.end_headers()
             try:
@@ -86,9 +98,20 @@ def test_two_gets_reuse_connection_return_minimum_and_preserve_status(endpoint, 
 def test_one_deadline_includes_full_body_and_both_requests(endpoint):
     url, _ = endpoint
     started = time.monotonic()
-    with pytest.raises(asyncio.TimeoutError):
+    with pytest.raises(asyncio.TimeoutError) as failure:
         delay.measure_delay(1, url + "/slow", .35, threading.Event())
     assert time.monotonic() - started < 1
+    assert failure.value.real_delay_connection_failure is False
+    assert failure.value.delay_response_codes == [200]
+
+
+@pytest.mark.parametrize("path,code", [("/403-then-stall", 403), ("/redirect-then-stall", 302)])
+def test_http_response_before_later_timeout_prevents_auto_delete(endpoint, path, code):
+    url, _ = endpoint
+    with pytest.raises(asyncio.TimeoutError) as failure:
+        delay.measure_delay(1, url + path, .4, threading.Event())
+    assert failure.value.delay_response_codes == [code]
+    assert failure.value.real_delay_connection_failure is False
 
 
 def test_deadline_includes_second_wait(endpoint):
@@ -152,10 +175,12 @@ def stalled_tls_proxy():
 def test_stalled_tls_obeys_total_deadline_and_releases_socket(stalled_tls_proxy):
     port, closed = stalled_tls_proxy
     started = time.monotonic()
-    with pytest.raises((TimeoutError, aiohttp.ClientError)):
+    with pytest.raises((TimeoutError, aiohttp.ClientError)) as failure:
         delay.measure_delay(port, "https://example.com/generate_204", .3, threading.Event())
     assert time.monotonic() - started < 1.5
     assert closed.wait(.5)
+    assert failure.value.real_delay_connection_failure is True
+    assert failure.value.delay_response_codes == []
 
 
 def test_stop_cancels_stalled_tls_without_waiting_for_handshake(stalled_tls_proxy):
@@ -171,3 +196,14 @@ def test_stop_cancels_stalled_tls_without_waiting_for_handshake(stalled_tls_prox
         assert closed.wait(.5)
     finally:
         timer.cancel()
+
+
+@pytest.mark.parametrize("error", [ValueError("invalid body"), RuntimeError("internal failure"),
+                                  ssl.SSLError("certificate failure"), ProxyConnectionError("local core unavailable")])
+def test_non_connection_errors_are_not_auto_delete_candidates(monkeypatch, error):
+    async def fail(*args):
+        raise error
+    monkeypatch.setattr(delay, "_requests", fail)
+    with pytest.raises(type(error)) as failure:
+        delay.measure_delay(1, "https://example.com", 1, threading.Event())
+    assert failure.value.real_delay_connection_failure is False
