@@ -1,6 +1,6 @@
 # V2Ray Desk
 
-A private, self-hosted configuration manager for Ubuntu with complete English and Persian interfaces.
+A self-hosted configuration manager for Ubuntu with public browsing, password-protected administration, and complete English and Persian interfaces.
 
 [راهنمای فارسی](README.fa.md)
 
@@ -9,7 +9,9 @@ A private, self-hosted configuration manager for Ubuntu with complete English an
 - Password-protected dashboard, secure sessions, CSRF protection and login rate limiting.
 - Bulk import of VLESS, VMess, Trojan and Shadowsocks links from text or files, including Base64 subscription text.
 - Subscription URL management: add, edit, refresh individually or together, and delete with optional removal of source-only configurations.
-- v2rayN-style Real Delay: two GETs over a reusable connection, minimum latency and 1–32 parallel workers with a shared Xray core.
+- Public, read-only results with country/protocol filters, Real Delay, Gemini status and one-click configuration copying; management requires sign-in.
+- A built-in catalog of 27 verified subscription URLs, daily refresh/testing, and optional deletion after two consecutive real connection failures.
+- v2rayN-style Real Delay: two GETs over a reusable connection, minimum latency and 1–128 parallel workers with a shared Xray core.
 - Exit-country detection, selectable country filtering, grouping, search and delay sorting.
 - Gemini HTTP check through the same proxy: 200, 403, 429, sign-in redirect and connection failures.
 - Edit, copy, export and delete configurations, including nonresponding configurations in the current filter.
@@ -98,13 +100,13 @@ are excluded from the delay. The measurement runs from the Ubuntu server; its ro
 HTTP runtime and network differ from v2rayN on a phone or PC, so values need not match.
 Older saved results are marked **Previous measurement** until retested.
 
-Choose 1–32 parallel tests (default 8). Bulk tests share one Xray process per bounded batch,
+Choose 1–128 parallel tests (default 8), including 64, 100 and 128 in the web panel. Bulk tests share one Xray process per bounded batch,
 with a separate loopback SOCKS port and a dedicated outbound route for every configuration.
 Only the selected number of workers are active; the queue supports 10,000 stored configurations.
 The UI fetches changed rows and renders 50 rows per page. Stop leaves queued rows unchanged
 and promptly cancels in-flight Real Delay, country and Gemini HTTP requests. DNS resolution
 or Xray startup/validation may still need to finish before the batch ends. Use 1–4 workers
-when comparing latency, since excess concurrency can increase host load and contention.
+when comparing latency or 8–128 for large queues. Higher concurrency can increase host load and measured delay.
 
 Country is looked up separately from the exit IP reported by Cloudflare, never inferred from
 the configuration's name. A missing country does not invalidate a successful delay test.
@@ -124,8 +126,8 @@ With country grouping enabled, delay sorting is applied within each group; disab
 
 - VLESS and VMess with standard UUIDs; Trojan; AEAD and 2022 Shadowsocks.
 - TCP, WebSocket, gRPC, HTTPUpgrade and basic XHTTP, with TLS or REALITY where compatible.
-- Plain link lists, Base64 content and managed subscription URLs with manual refresh.
-- Up to 2,000 links per import, 10,000 stored configurations, 4 MB request bodies and 1–32 concurrent tests.
+- Plain link lists, Base64 content and managed subscription URLs with manual or daily refresh.
+- Up to 2,000 links per import, 10,000 stored configurations, 4 MB request bodies and 1–128 concurrent tests.
 - Unsupported: arbitrary Xray JSON, Shadowsocks plugins, KCP/QUIC, custom XHTTP `extra`,
   legacy VMess with nonzero alterId, and disabled TLS certificate verification.
 - Local, private and reserved server addresses are rejected. The resolved public address is pinned during a test.
@@ -145,6 +147,9 @@ Panel address settings: `/etc/v2ray-desk/config.json`
 Nginx site: `/etc/nginx/conf.d/v2ray-desk.conf`
 
 Configuration links contain credentials and are stored unencrypted in the private data directory.
+The public homepage intentionally shares every saved configuration and its full link with visitors
+who have the panel address. Subscription URLs, administrative settings and mutation endpoints
+remain password protected. This installation is intended to share its configuration collection.
 On Linux/POSIX, initialization enforces `0700` on the data directory and `0600` on the
 SQLite database and its journal, WAL and shared-memory files, including existing files.
 Back up the complete data directory with the service stopped, or use SQLite's online backup API.
@@ -168,7 +173,7 @@ PANEL_COOKIE_SECURE=0 python manage.py serve
 ```bash
 python tools/install_xray.py --destination /tmp/v2ray-desk-xray
 XRAY_TEST_BIN=/tmp/v2ray-desk-xray python -m pytest -q
-node --test tests/test_frontend.js
+node --test tests/test_frontend.js tests/test_public_frontend.js
 ```
 
 The UI regression tests use Node.js 24 in CI and require no npm packages.
@@ -190,7 +195,7 @@ Open **Subscriptions**, enter a name and an HTTP/HTTPS URL, then choose **Add & 
 Plain-text and Base64 lists are accepted (4 MB and 2,000 links per subscription, up to 100 subscriptions).
 Each download has a 45-second total deadline covering DNS, redirects, response headers and body.
 The size limit applies to both transferred and decompressed data.
-Refresh can be run individually or for all enabled subscriptions; there is no scheduled polling.
+Refresh can be run individually, for all enabled subscriptions, or by the daily schedule.
 Changes to the source are reconciled without duplicating configurations. Manual imports, edited
 configurations, and configurations shared with another subscription are preserved. A failed or
 unsupported-only download leaves the previous list intact. Unsupported links are counted.
@@ -199,6 +204,35 @@ its unedited, source-only configurations. Deleted configurations may return on t
 if the source still contains them. Subscription URLs may contain secrets and stay in the private
 database; they are shown only in the authenticated edit form. Public HTTP/HTTPS destinations
 only: private/local addresses, insecure TLS, and HTTPS-to-HTTP redirects are rejected.
+
+The built-in catalog registers 27 feeds once: 8 from [Barry](https://github.com/barry-far/v2ray-config),
+11 V2Ray batches from [Delta](https://github.com/Delta-Kronecker/V2ray-Config), and 8 from
+[Epodonios](https://github.com/Epodonios/v2ray-configs). The first two feeds per provider are enabled
+and downloaded automatically; enable additional feeds in Subscriptions. Existing matching URLs,
+custom names and disabled choices are preserved. Removed sources stay removed after restart;
+**Add missing** restores the selected provider's missing entries. URLs were checked on 2026-10-21;
+upstream contents and availability can change. A failed refresh preserves the previous collection.
+
+Deduplication uses a hash of canonical Xray connection settings, excluding the display name.
+One connection with 100 names is stored once; memberships in multiple subscriptions are retained.
+Filter by subscription or protocol alongside country, status and search. Exports support plain
+links or UTF-8 Base64; the existing CSV report remains available.
+
+## Daily schedule and automatic cleanup
+
+**Daily schedule** is enabled initially at **03:00 Tehran time (UTC+03:30)** with **100 parallel tests**.
+It refreshes enabled subscriptions and then tests every saved configuration for Real Delay,
+exit country and Gemini. The hour and concurrency are configurable. It waits for manual testing
+or subscription refresh to finish, persists the next run across restarts, and records the last
+attempt and summary. A missed scheduled run starts once after the panel resumes; interrupted
+work is reported and the next scheduled run is retained. Only one web process should be used.
+
+Automatic deletion is **off by default**, independently configurable for manual and daily tests.
+When enabled, two consecutive completed test jobs with verified real connection failure delete
+the configuration. Two GET requests within one test count as one test. Any HTTP response resets
+the streak; Gemini 403, engine/internal errors, certificate-validation errors, and cancelled jobs
+cannot trigger deletion. Deleted fingerprints stay excluded from subscriptions; an explicit
+manual import restores a link. Edited configurations start with a fresh failure streak.
 
 ## Results table
 
@@ -216,6 +250,14 @@ table instead of widening the entire page. All controls are available in English
 - CSV reports preserve the visible/selected order and include delay, country, Gemini HTTP and error details. Proxy credentials and full configuration links are excluded; spreadsheet formulas in imported names are escaped.
 - Invalid UUID, REALITY keys/short IDs, Vision combinations and Shadowsocks 2022 keys are rejected with a specific explanation. Saved configurations also pass Xray's `run -test` check. Invalid settings are separate from a timeout or test environment error; one invalid node does not fail the entire batch.
 - The web footer and SSH `info` command show the installed Xray version.
+
+## Changes in 1.4
+
+- Parallel testing supports up to 128 active workers, with new 64, 100 and 128 options. The default remains 8.
+- The login password field keeps its full width and stable size during focus, autofill and password reveal.
+- Public read-only browsing, subscription/protocol filters, preset subscriptions and Base64 exports.
+- Daily subscription refresh and complete tests, plus optional safe two-failure cleanup.
+- Configuration identity is independent of names, including across multiple sources.
 
 ## Fixes in 1.3
 
