@@ -1,4 +1,5 @@
 import json
+import subprocess
 import threading
 import time
 from contextlib import contextmanager
@@ -111,6 +112,188 @@ def test_hundred_workers_persist_results_across_bounded_shared_batches(client, m
         rows = db.execute("SELECT id,status,latency_ms,samples,successes FROM configs ORDER BY id").fetchall()
     assert all(row["status"] == "healthy" and row["latency_ms"] == 10000 + row["id"]
                and row["samples"] == row["successes"] == 2 for row in rows)
+
+
+def prepared_batch(client, monkeypatch, count=128):
+    manager = client.application.extensions["tester"]
+    with connect(manager.db_path) as db:
+        db.executemany("""INSERT INTO configs(uri,name,protocol,host,port,fingerprint,real_failure_streak)
+            VALUES (?,?, 'vless','example.com',443,?,1)""", [(LINK, str(i), str(i)) for i in range(count)])
+        ids = [row[0] for row in db.execute("SELECT id FROM configs ORDER BY id")]
+    monkeypatch.setattr(tester.shutil, "which", lambda _: "/xray")
+    monkeypatch.setattr(tester, "public_address", lambda *args: "1.1.1.1")
+    return manager, ids
+
+
+def test_invalid_isolation_keeps_hundred_valid_workers_in_one_core(client, monkeypatch):
+    manager, ids = prepared_batch(client, monkeypatch)
+    invalid = {ids[0], ids[64], ids[-1]}
+    validations, running_cores, entered = [], [], []
+    release, guard = threading.Event(), threading.Lock()
+
+    def validate(prepared, executable):
+        assert not entered, "Network testing must wait until isolation is complete"
+        validations.append([row["id"] for row in prepared])
+        if any(row["id"] in invalid for row in prepared):
+            raise tester.InvalidConfigError("Synthetic invalid settings")
+
+    @contextmanager
+    def core(prepared, executable, stop):
+        if any(row["id"] in invalid for row in prepared):
+            raise tester.InvalidConfigError("Synthetic invalid settings")
+        running_cores.append([row["id"] for row in prepared])
+        yield {row["id"]: 10000 + row["id"] for row in prepared}
+
+    def probe(port, stop, **options):
+        with guard:
+            entered.append(port)
+        assert release.wait(15)
+        return tester.result("healthy", latency_ms=100, successes=2, samples=2)
+
+    monkeypatch.setattr(tester, "validate_batch", validate)
+    monkeypatch.setattr(tester, "shared_core", core)
+    monkeypatch.setattr(tester, "probe_connection", probe)
+    manager.start(ids, {"workers": 100, "country": False, "gemini": False, "auto_delete_failed": True})
+    try:
+        wait_until(lambda: len(entered) == 100)
+        assert manager.snapshot()["active"] == 100
+    finally:
+        release.set()
+        wait_until(lambda: not manager.snapshot()["running"], timeout=10)
+    assert validations and running_cores == [[config_id for config_id in ids if config_id not in invalid]]
+    assert len(entered) == len(set(entered)) == 125
+    assert manager.snapshot()["done"] == 128 and manager.snapshot()["auto_deleted"] == 0
+    with connect(manager.db_path) as db:
+        rows = db.execute("SELECT id,status,real_failure_streak FROM configs ORDER BY id").fetchall()
+    assert all(row["status"] == ("invalid" if row["id"] in invalid else "healthy") for row in rows)
+    assert all(row["real_failure_streak"] == (1 if row["id"] in invalid else 0) for row in rows)
+
+
+def test_stop_during_invalid_isolation_does_not_launch_survivor_core(client, monkeypatch):
+    manager, ids = prepared_batch(client, monkeypatch)
+    validating, release = threading.Event(), threading.Event()
+    attempts = []
+
+    @contextmanager
+    def core(prepared, executable, stop):
+        attempts.append(len(prepared))
+        raise tester.InvalidConfigError("Synthetic invalid settings")
+        yield  # This context never starts a running core.
+
+    def validate(prepared, executable):
+        validating.set()
+        assert release.wait(10)
+
+    monkeypatch.setattr(tester, "validate_batch", validate)
+    monkeypatch.setattr(tester, "shared_core", core)
+    manager.start(ids, {"workers": 100, "auto_delete_failed": True})
+    try:
+        assert validating.wait(3)
+        manager.cancel()
+    finally:
+        release.set()
+        wait_until(lambda: not manager.snapshot()["running"])
+    assert attempts == [128]
+    assert manager.snapshot()["cancelled"] and manager.snapshot()["done"] == 0
+    with connect(manager.db_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM configs WHERE status='pending' AND real_failure_streak=1").fetchone()[0] == 128
+
+
+@pytest.mark.parametrize("failure", [OSError("Synthetic resource failure"),
+                                     subprocess.TimeoutExpired("xray", 12),
+                                     tester.ConfigError("Synthetic startup failure")])
+@pytest.mark.parametrize("during_isolation", [False, True])
+def test_environment_failure_does_not_recursively_launch_cores(client, monkeypatch, failure, during_isolation):
+    manager, ids = prepared_batch(client, monkeypatch)
+    attempts, validations = [], []
+
+    @contextmanager
+    def core(prepared, executable, stop):
+        attempts.append(len(prepared))
+        if during_isolation:
+            raise tester.InvalidConfigError("Synthetic invalid settings")
+        raise failure
+        yield  # No running core exists after either failure.
+
+    def validate(prepared, executable):
+        validations.append(len(prepared))
+        raise failure
+
+    monkeypatch.setattr(tester, "validate_batch", validate)
+    monkeypatch.setattr(tester, "shared_core", core)
+    manager.start(ids, {"workers": 100, "auto_delete_failed": True})
+    wait_until(lambda: not manager.snapshot()["running"])
+    assert attempts == [128] and validations == ([64] if during_isolation else [])
+    assert manager._job_unsafe and manager.snapshot()["done"] == 128
+    assert manager.snapshot()["auto_deleted"] == 0
+    with connect(manager.db_path) as db:
+        rows = db.execute("SELECT status,error,real_failure_streak FROM configs").fetchall()
+        assert db.execute("SELECT COUNT(*) FROM rejected_configs").fetchone()[0] == 0
+    assert len(rows) == 128
+    assert all(row["status"] == "error" and row["real_failure_streak"] == 1 for row in rows)
+    assert all("Synthetic" not in row["error"] for row in rows)
+
+
+def test_stop_during_core_validation_does_not_start_process(monkeypatch):
+    stop = threading.Event()
+    prepared = [{"id": 1, "parsed": tester.parse_uri(LINK), "address": "1.1.1.1"}]
+    monkeypatch.setattr(tester, "engine_validation", lambda *args: stop.set())
+    def unexpected_process(*args, **kwargs):
+        pytest.fail("Stop during validation must prevent core startup")
+    monkeypatch.setattr(tester.subprocess, "Popen", unexpected_process)
+    with tester.shared_core(prepared, "/xray", stop) as ports:
+        assert ports == {}
+
+
+def test_recombined_validation_failure_does_not_repeat_isolation(client, monkeypatch):
+    manager, ids = prepared_batch(client, monkeypatch, count=4)
+    attempts, validations = [], []
+
+    @contextmanager
+    def core(prepared, executable, stop):
+        attempts.append(len(prepared))
+        raise tester.InvalidConfigError("Synthetic inconsistent engine failure")
+        yield
+
+    def validate(prepared, executable):
+        validations.append(len(prepared))
+
+    monkeypatch.setattr(tester, "validate_batch", validate)
+    monkeypatch.setattr(tester, "shared_core", core)
+    manager.start(ids, {"workers": 4, "auto_delete_failed": True})
+    wait_until(lambda: not manager.snapshot()["running"])
+    assert attempts == [4, 4] and validations == [2, 2]
+    assert manager._job_unsafe and manager.snapshot()["done"] == 4
+    with connect(manager.db_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM configs WHERE status='error' AND real_failure_streak=1").fetchone()[0] == 4
+
+
+@pytest.mark.parametrize("returncode,diagnostic", [(-9, b""), (3221225477, b""),
+    (2, b"fatal error: runtime memory failure with password=secret"),
+    (1, b"permission denied reading configuration")])
+def test_validation_process_crash_is_unsafe_without_recursive_retries(client, monkeypatch, returncode, diagnostic):
+    manager, ids = prepared_batch(client, monkeypatch, count=4)
+    validations = []
+    def crashed(args, **kwargs):
+        validations.append(args)
+        return subprocess.CompletedProcess(args, returncode, b"", diagnostic)
+    monkeypatch.setattr(tester.subprocess, "run", crashed)
+    manager.start(ids, {"workers": 4, "auto_delete_failed": True})
+    wait_until(lambda: not manager.snapshot()["running"])
+    assert len(validations) == 1 and manager._job_unsafe
+    assert manager.snapshot()["done"] == 4 and manager.snapshot()["auto_deleted"] == 0
+    with connect(manager.db_path) as db:
+        rows = db.execute("SELECT status,error,real_failure_streak FROM configs").fetchall()
+    assert all(row["status"] == "error" and row["real_failure_streak"] == 1 for row in rows)
+    assert all("secret" not in row["error"] for row in rows)
+
+
+def test_single_probe_reports_validation_crash_as_error(monkeypatch):
+    monkeypatch.setattr(tester, "public_address", lambda *args: "1.1.1.1")
+    monkeypatch.setattr(tester.subprocess, "run", lambda args, **kwargs:
+                        subprocess.CompletedProcess(args, -9, b"", b""))
+    outcome = tester.probe(LINK, "/xray", threading.Event())
+    assert outcome["status"] == "error"
 
 
 def test_completed_results_are_not_held_behind_slow_first_worker(client, monkeypatch):

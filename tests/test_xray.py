@@ -155,24 +155,37 @@ def test_bulk_shared_core_keeps_nodes_isolated(real_proxy, tmp_path, monkeypatch
     assert len(cores) == 1 and cores[0].poll() is not None
 
 
-def test_invalid_engine_settings_do_not_fail_valid_neighbor(real_proxy, tmp_path):
+def test_invalid_engine_settings_do_not_fail_valid_neighbor(real_proxy, tmp_path, monkeypatch):
     from panel.store import initialize, connect
     bad = f"vless://{UUID}@example.com:443?encryption=invalid-secret-value"
     db_path = initialize(tmp_path / "invalid-batch")
     with connect(db_path) as db:
-        for uri in (real_proxy, bad):
+        for index, uri in enumerate((real_proxy, bad, real_proxy)):
             parsed = parse_uri(uri)
+            # Deliberately duplicate the local fixture to put valid rows on both
+            # sides of the invalid setting without contacting public endpoints.
+            parsed["fingerprint"] += str(index)
             db.execute("INSERT INTO configs(uri,name,protocol,host,port,fingerprint) VALUES(?,?,?,?,?,?)",
                        [parsed[k] for k in ("uri", "name", "protocol", "host", "port", "fingerprint")])
+    original = subprocess.Popen
+    cores, validations = [], []
+    def tracked(args, **kwargs):
+        process = original(args, **kwargs)
+        if "run" in args:
+            (validations if "-test" in args else cores).append(process)
+        return process
+    monkeypatch.setattr(subprocess, "Popen", tracked)
     manager = tester.TestManager(db_path, XRAY)
     assert manager.engine["available"] and manager.engine["version"]
-    manager.start([1, 2], {"workers": 2, "timeout": 2, "country": False, "gemini": False})
+    manager.start([1, 2, 3], {"workers": 2, "timeout": 2, "country": False, "gemini": False})
     deadline = time.monotonic() + 15
     while manager.snapshot()["running"] and time.monotonic() < deadline:
         time.sleep(.05)
-    assert not manager.snapshot()["running"] and manager.snapshot()["done"] == 2
+    assert not manager.snapshot()["running"] and manager.snapshot()["done"] == 3
     with connect(db_path) as db:
         rows = db.execute("SELECT status,error FROM configs ORDER BY id").fetchall()
-    assert rows[0]["status"] == "healthy"
+    assert rows[0]["status"] == rows[2]["status"] == "healthy"
     assert rows[1]["status"] == "invalid" and "encryption" in rows[1]["error"]
     assert "invalid-secret-value" not in rows[1]["error"] and UUID not in rows[1]["error"]
+    assert len(cores) == 1 and cores[0].poll() is not None
+    assert len(validations) == 6 and all(process.poll() is not None for process in validations)

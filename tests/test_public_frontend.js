@@ -8,15 +8,22 @@ const vm = require("node:vm");
 class Element {
   constructor(tag = "div") {
     this.tagName = tag.toUpperCase(); this.children = []; this.listeners = {};
-    this.value = ""; this.disabled = false; this.open = false; this._text = "";
+    this.value = ""; this.disabled = false; this.open = false; this.checked = false; this._text = "";
     this.classes = new Set();
     this.classList = {toggle:(name,value) => value ? this.classes.add(name) : this.classes.delete(name)};
   }
   set textContent(value) { this._text = String(value); this.children = []; }
   get textContent() { return this._text + this.children.map(child=>child.textContent).join(""); }
   set innerHTML(_value) { throw Error("Untrusted HTML must not be inserted"); }
-  append(...children) { this.children.push(...children); }
-  replaceChildren(...children) { this._text = ""; this.children = children; }
+  append(...children) { for (const child of children) { child.parentElement=this; this.children.push(child); } }
+  replaceChildren(...children) { this._text = ""; this.children = []; this.append(...children); }
+  querySelectorAll(selector) {
+    return this.children.flatMap(child=>[
+      ...(selector === "input[type=checkbox]" && child.tagName === "INPUT" && child.type === "checkbox" ? [child] : []),
+      ...child.querySelectorAll(selector)
+    ]);
+  }
+  closest(tag) { return this.tagName === tag.toUpperCase() ? this : this.parentElement?.closest(tag); }
   setAttribute(name,value) { this[name] = value; }
   addEventListener(name,handler) { this.listeners[name] = handler; }
   showModal() { this.open = true; }
@@ -69,7 +76,7 @@ test("a superseded list response cannot replace newer filtered results",async()=
   await newRequest;
   releaseOld(response(snapshot([row(1,"Old result")])));
   await oldRequest;
-  assert.equal(app.get("public-rows").children[0].children[1].textContent,"New result");
+  assert.equal(app.get("public-rows").children[0].children[2].textContent,"New result");
   assert.equal(app.get("public-refresh").disabled,false);
   assert.equal(app.get("public-notice").hidden,true);
   assert.match(app.requests.at(-1).url,/^\/desk\/api\/public\/configs\?/);
@@ -96,9 +103,9 @@ test("untrusted names are plain text in the row and copy label",async()=>{
   app.set("fixture",snapshot([row(1,name)]));
   app.run("render(fixture)");
   const cells=app.get("public-rows").children[0].children;
-  assert.equal(cells[1].textContent,name);
-  assert.equal(cells[1].children.length,0);
-  assert.equal(cells[1].title,name);
+  assert.equal(cells[2].textContent,name);
+  assert.equal(cells[2].children.length,0);
+  assert.equal(cells[2].title,name);
   assert.equal(cells.at(-1).children[0]["aria-label"],`Copy ${name}`);
 });
 
@@ -152,7 +159,7 @@ test("a disappeared country clears its filter and fetches page one of All",async
   assert.equal(params.get("country"),"");
   assert.equal(params.get("page"),"1");
   assert.equal(app.get("public-country").value,"");
-  assert.equal(app.get("public-rows").children[0].children[1].textContent,"US result");
+  assert.equal(app.get("public-rows").children[0].children[2].textContent,"US result");
   assert.equal(app.get("public-page").textContent,"1 / 1");
   assert.equal(app.get("public-next").disabled,true);
 });
@@ -182,4 +189,142 @@ test("search debounce sends only the final term and resets pagination",async()=>
   assert.equal(params.get("q"),"final");
   assert.equal(params.get("page"),"1");
   assert.equal(app.requests.length,start+1);
+});
+
+test("public selections persist across pages and clear when a filter changes",async()=>{
+  const app=await loadPublic();
+  app.set("fixture",snapshot([row(1),row(2)],{pages:2,total:4}));
+  app.run("render(fixture); $('public-select-page').checked=true; $('public-select-page').listeners.change();");
+  assert.equal(app.run("selected.size"),2);
+  assert.equal(app.get("public-select-page").checked,true);
+  app.set("fixture",snapshot([row(3),row(4)],{page:2,pages:2,total:4}));
+  app.run("render(fixture)");
+  assert.equal(app.get("public-select-page").checked,false);
+  const check=app.get("public-rows").querySelectorAll("input[type=checkbox]")[0];
+  check.checked=true; check.listeners.change();
+  assert.equal(app.run("selected.size"),3);
+  assert.equal(app.get("public-select-page").indeterminate,true);
+  app.set("fixture",snapshot([row(1),row(2)],{pages:2,total:4}));
+  app.run("render(fixture)");
+  assert.equal(app.get("public-select-page").checked,true);
+  assert.equal(app.get("public-rows").querySelectorAll("input[type=checkbox]").every(input=>input.checked),true);
+  app.run("$('public-protocol').value='vmess'; $('public-protocol').listeners.change()");
+  await settle();
+  assert.equal(app.run("selected.size"),0);
+  assert.equal(app.get("public-copy-selected").disabled,true);
+});
+
+test("public selection is disabled while a new filtered result is pending",async()=>{
+  const app=await loadPublic();
+  app.set("fixture",snapshot([row(1)])); app.run("render(fixture)");
+  let release;
+  app.setHandler(()=>new Promise(resolve=>{release=resolve;}));
+  const loading=app.run("load()");
+  assert.equal(app.get("public-select-page").disabled,true);
+  const check=app.get("public-rows").querySelectorAll("input[type=checkbox]")[0];
+  assert.equal(check.disabled,true);
+  check.checked=true; check.listeners.change();
+  assert.equal(app.run("selected.size"),0);
+  release(response(snapshot([row(2)]))); await loading;
+  assert.equal(app.get("public-select-page").disabled,false);
+});
+
+test("bulk copy preserves snapshot order, omits removed rows and supports clipboard fallback",async()=>{
+  const app=await loadPublic();
+  app.run("selected=new Set([2,3,1]); syncSelection()");
+  app.setHandler(async()=>response({configs:[{id:1,uri:"vless://one"},{id:2,uri:"vless://two"}]}));
+  await app.run("copySelected()");
+  assert.equal(app.requests.at(-1).url,"/api/public/copy?ids=2,3,1");
+  assert.equal(app.get("public-copy-text").value,"vless://two\nvless://one");
+  assert.equal(app.get("public-copy-dialog").open,true);
+  assert.match(app.get("public-copy-status").textContent,/2 configuration links ready to copy/);
+  assert.match(app.get("public-copy-status").textContent,/1 configurations are no longer available/);
+  assert.equal(app.run("JSON.stringify([...selected])"),"[2,1]");
+  assert.equal(app.get("public-copy-selected").disabled,false);
+});
+
+test("changing filters during bulk copy never changes the copied snapshot or newer selection",async()=>{
+  let copied,release;
+  const app=await loadPublic({clipboard:{writeText:async text=>{copied=text;}}});
+  app.setHandler(url=>url.startsWith("/api/public/copy?") ? new Promise(resolve=>{release=resolve;}) : Promise.resolve(response(snapshot([row(99)]))));
+  app.run("selected=new Set([2,1]); syncSelection()");
+  const copying=app.run("copySelected()");
+  app.run("$('public-protocol').value='vless'; $('public-protocol').listeners.change()"); await settle();
+  const check=app.get("public-rows").querySelectorAll("input[type=checkbox]")[0];
+  check.checked=true; check.listeners.change();
+  release(response({configs:[{id:2,uri:"ss://two"},{id:1,uri:"ss://one"}]}));
+  await copying;
+  assert.equal(copied,"ss://two\nss://one");
+  assert.equal(app.run("JSON.stringify([...selected])"),"[99]");
+});
+
+test("bulk copying uses at most three concurrent requests of no more than 500 IDs",async()=>{
+  let copied,active=0,maxActive=0;
+  const pending=[];
+  const app=await loadPublic({clipboard:{writeText:async text=>{copied=text;}}});
+  app.run("selected=new Set(Array.from({length:1501},(_,index)=>index+1)); syncSelection()");
+  app.setHandler(url=>{
+    const ids=new URL(url,"https://example.test").searchParams.get("ids").split(",").map(Number);
+    assert.ok(ids.length<=500);
+    active++; maxActive=Math.max(maxActive,active);
+    return new Promise(resolve=>pending.push(()=>{active--;resolve(response({configs:ids.map(id=>({id,uri:`ss://${id}`}))}));}));
+  });
+  const copying=app.run("copySelected()");
+  assert.equal(pending.length,3);
+  pending[2](); await settle();
+  assert.equal(pending.length,4);
+  pending[3](); pending[1](); pending[0]();
+  await copying;
+  assert.equal(maxActive,3);
+  assert.equal(copied.split("\n").length,1501);
+  assert.equal(copied.split("\n")[0],"ss://1");
+  assert.equal(copied.split("\n").at(-1),"ss://1501");
+});
+
+test("missing selections clear after copying and failed requests preserve selection for retry",async()=>{
+  const app=await loadPublic();
+  app.run("selected=new Set([1]); syncSelection()");
+  app.setHandler(async()=>response({},500));
+  await app.run("copySelected()");
+  assert.equal(app.run("selected.size"),1);
+  assert.equal(app.get("public-copy-selected").disabled,false);
+  app.setHandler(async()=>response({configs:[]}));
+  await app.run("copySelected()");
+  assert.equal(app.run("selected.size"),0);
+  assert.equal(app.get("public-copy-selected").disabled,true);
+  assert.equal(app.get("public-copy-dialog").open,false);
+  assert.match(app.get("public-notice").textContent,/no longer available/);
+});
+
+test("a failed bulk-copy chunk stops scheduling and keeps retry locked until active requests finish",async()=>{
+  let copied;
+  const pending=[];
+  const app=await loadPublic({clipboard:{writeText:async text=>{copied=text;}}});
+  app.run("selected=new Set(Array.from({length:2000},(_,index)=>index+1)); syncSelection()");
+  app.setHandler(()=>new Promise(resolve=>pending.push(resolve)));
+  const copying=app.run("copySelected()");
+  assert.equal(pending.length,3);
+  pending[0](response({},500));
+  await settle();
+  assert.equal(app.run("copyingSelection"),true);
+  assert.equal(app.get("public-copy-selected").disabled,true);
+  await app.run("copySelected()");
+  assert.equal(pending.length,3);
+  pending[1](response({configs:[]}));
+  await settle();
+  assert.equal(pending.length,3);
+  assert.equal(app.run("copyingSelection"),true);
+  pending[2](response({configs:[]}));
+  await copying;
+  assert.equal(pending.length,3);
+  assert.equal(copied,undefined);
+  assert.equal(app.run("selected.size"),2000);
+  assert.equal(app.run("copyingSelection"),false);
+  assert.equal(app.get("public-copy-selected").disabled,false);
+  assert.match(app.get("public-notice").textContent,/Could not load the data/);
+
+  app.run("selected=new Set([1]); syncSelection()");
+  app.setHandler(async()=>response({configs:[{id:1,uri:"ss://retry"}]}));
+  await app.run("copySelected()");
+  assert.equal(copied,"ss://retry");
 });

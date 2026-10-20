@@ -1,4 +1,5 @@
 from panel.store import connect
+import pytest
 from test_panel import LINK, add, client, send
 
 
@@ -46,3 +47,28 @@ def test_public_copy_not_found_and_prefixed_paths(client):
     assert 'content="/custom"' in home.text
     assert '/custom/login' in home.text and '/custom/static/public.js' in home.text
     assert 'dir="rtl"' in home.text
+
+
+def test_public_bulk_copy_preserves_selection_order_and_skips_missing(client):
+    add(client, "\n".join(LINK.replace("example.com", f"node{i}.example.com") for i in range(3)))
+    visitor = client.application.test_client()
+    result = visitor.get("/api/public/copy?ids=3,1,3,999").json
+    assert [row["id"] for row in result["configs"]] == [3, 1]
+    assert result["configs"][0]["uri"] == LINK.replace("example.com", "node2.example.com")
+    assert all(set(row) == {"id", "uri"} for row in result["configs"])
+    assert visitor.get("/api/public/copy?ids=999").json == {"configs": []}
+    assert visitor.get("/api/configs").status_code == 401
+
+
+@pytest.mark.parametrize("ids", ["", "0", "-1", "1.5", "1,,2", "1;DROP TABLE configs", "9" * 19,
+                                    ",".join(str(i) for i in range(1, 502))])
+def test_public_bulk_copy_rejects_bad_or_oversized_selection(client, ids):
+    visitor = client.application.test_client()
+    assert visitor.get("/api/public/copy", query_string={"ids": ids}).status_code == 400
+    assert visitor.get("/api/public/configs").status_code == 200
+
+
+def test_public_bulk_copy_accepts_bounded_selection(client):
+    visitor = client.application.test_client()
+    ids = ",".join(str(i) for i in range(1, 501))
+    assert visitor.get("/api/public/copy", query_string={"ids": ids}).status_code == 200
