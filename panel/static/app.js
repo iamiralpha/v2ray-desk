@@ -10,6 +10,7 @@ const names = new Intl.DisplayNames([EN ? "en" : "fa"], {type: "region"});
 let records = [], selected = new Set(), activeCountry = "", page = 1, running = false;
 let fetching = false, pendingDelete = null, toastTimer;
 let configsCursor = null, filterCache = null, lastSelectedId = null;
+let subscriptions = [], activeSubscription = "", subscriptionSync = {running:false, total:0, done:0};
 const countryNames = new Map();
 const perPage = 50;
 const statusNames = {pending: L("تست‌نشده", "Not tested"), healthy: L("دارای پاسخ", "Responding"), failed: L("بدون پاسخ", "No response"), error: L("خطای تست", "Test error"), invalid: L("تنظیمات نامعتبر", "Invalid settings"), testing: L("در حال تست", "Testing")};
@@ -88,7 +89,10 @@ function filtered() {
   const term = $("search").value.trim().toLowerCase();
   const status = $("status-filter").value;
   const gemini = $("gemini-filter").value;
+  const protocol = $("protocol-filter").value;
   const list = records.filter(item => (!activeCountry || (item.country || "unknown") === activeCountry)
+    && (!activeSubscription || (activeSubscription === "none" ? !(item.subscription_ids || []).length : (item.subscription_ids || []).includes(Number(activeSubscription))))
+    && (!protocol || item.protocol === protocol)
     && (!status || item.status === status)
     && (!gemini || item.gemini_status === gemini)
     && (!term || `${item.name} ${item.host} ${item.protocol} ${countryName(item.country)}`.toLowerCase().includes(term)));
@@ -132,7 +136,8 @@ function syncButtons() {
   $("empty-import").disabled = running;
   for (const input of document.querySelectorAll(".test-settings select,.test-settings input")) input.disabled = running;
   const testCount = testScope().length;
-  $("test-btn").disabled = running || testCount === 0;
+  $("test-btn").disabled = running || subscriptionSync.running || testCount === 0;
+  for (const button of document.querySelectorAll(".row-test")) button.disabled = running || subscriptionSync.running;
   $("export-btn").disabled = scope().length === 0;
   $("report-btn").disabled = scope().length === 0;
   $("delete-selected").disabled = running || selected.size === 0;
@@ -141,12 +146,46 @@ function syncButtons() {
   $("test-btn").textContent = L(`▷ تست (${num.format(testCount)})`, `▷ Test (${num.format(testCount)})`);
   $("export-btn").textContent = selected.size ? L("دریافت انتخاب‌شده‌ها ↓", "Export selected \u2193") : L("دریافت فهرست ↓", "Export results \u2193");
   $("selection-text").textContent = selected.size ? L(`${num.format(selected.size)} کانفیگ انتخاب شده`, `${num.format(selected.size)} configurations selected`) : L("کانفیگی انتخاب نشده", "No configurations selected");
+  syncSubscriptionControls();
 }
 function resetView() {
   filterCache = null;
   page = 1;
   selected.clear(); lastSelectedId = null;
   render();
+}
+function updateSubscriptions(items) {
+  if (!Array.isArray(items)) return false;
+  const next = items.map(({id,name,config_count}) => ({id,name,config_count}));
+  if (JSON.stringify(next) === JSON.stringify(subscriptions)) return false;
+  subscriptions = next; filterCache = null;
+  return true;
+}
+function renderSubscriptionFilter() {
+  const select = $("subscription-filter");
+  select.replaceChildren();
+  for (const [value, text] of [["", L("همهٔ ساب‌ها", "All subscriptions")],
+    ["none", L(`بدون ساب (${num.format(records.filter(row => !(row.subscription_ids || []).length).length)})`, `Without subscription (${num.format(records.filter(row => !(row.subscription_ids || []).length).length)})`)],
+    ...subscriptions.map(sub => [String(sub.id), `${sub.name} (${num.format(sub.config_count)})`])]) {
+    const option = node("option", text); option.value = value; select.append(option);
+  }
+  if (activeSubscription && activeSubscription !== "none" && !subscriptions.some(sub => String(sub.id) === activeSubscription)) {
+    activeSubscription = ""; filterCache = null; page = 1;
+    selected.clear(); lastSelectedId = null;
+  }
+  select.value = activeSubscription;
+}
+function updateSubscriptionProgress(progress) {
+  if (progress) subscriptionSync = progress;
+  const counted = subscriptionSync.total > 0 && (!subscriptionSync.running || subscriptionSync.done < subscriptionSync.total);
+  const text = counted
+    ? L(`دریافت ساب‌ها: ${num.format(subscriptionSync.done)} از ${num.format(subscriptionSync.total)}`, `Subscription sync: ${num.format(subscriptionSync.done)} of ${num.format(subscriptionSync.total)}`)
+    : L("دریافت ساب‌ها", "Subscription sync");
+  $("subscription-sync-status").hidden = !subscriptionSync.running;
+  $("subscription-sync-status").textContent = text + L(" · تست پس از پایان دریافت فعال می‌شود.", " · Testing is available when syncing finishes.");
+  subsProgress.hidden = !subscriptionSync.running && !subscriptionSync.total;
+  subsProgress.textContent = text + (subscriptionSync.running ? L(" · در حال دریافت…", " · Downloading…") : L(" · تمام شد", " · Complete"));
+  syncSubscriptionControls();
 }
 function renderCountries() {
   const counts = new Map();
@@ -181,6 +220,7 @@ function renderCountries() {
 }
 function render() {
   renderCountries();
+  renderSubscriptionFilter();
   const list = filtered();
   const ids = new Set(list.map(row => row.id));
   selected = new Set([...selected].filter(id => ids.has(id)));
@@ -260,12 +300,12 @@ function render() {
     tr.append(checked);
     const ops = node("td", undefined, "row-actions");
     for (const [label, icon, fn, disabled] of [
-      [L("تست این کانفیگ", "Test this configuration"), "▷", () => startTest([item.id]), running],
+      [L("تست این کانفیگ", "Test this configuration"), "▷", () => startTest([item.id]), running || subscriptionSync.running],
       [L("ویرایش کانفیگ", "Edit configuration"), "✎", () => openEdit(item.id), running],
       [L("کپی لینک", "Copy link"), "⧉", () => copyConfig(item.id), false],
       [L("حذف کانفیگ", "Delete configuration"), "×", () => askDelete([item.id], false), running]
     ]) {
-      const button = node("button", icon, "icon-button");
+      const button = node("button", icon, icon === "▷" ? "icon-button row-test" : "icon-button");
       button.title = label; button.setAttribute("aria-label", label); button.disabled = disabled;
       button.addEventListener("click", action(fn)); ops.append(button);
     }
@@ -296,6 +336,9 @@ async function refresh() {
     configsCursor = data.cursor;
     $("engine-version").textContent = data.engine?.version ? `Xray ${data.engine.version}` : L("Xray در دسترس نیست", "Xray unavailable");
     const wasRunning = running;
+    const wasSyncing = subscriptionSync.running;
+    const subscriptionsChanged = updateSubscriptions(data.subscriptions);
+    updateSubscriptionProgress(data.subscription_sync);
     if (data.full) records = data.configs;
     else if (data.configs.length) {
       const updates = new Map(data.configs.map(row => [row.id, row]));
@@ -303,23 +346,30 @@ async function refresh() {
     }
     running = data.job.running;
     $("job").hidden = !running;
+    const autoDeleted = Number(data.job.auto_deleted || 0);
+    const deletedText = L(`${num.format(autoDeleted)} کانفیگ پس از دو شکست اتصال پیاپی خودکار حذف شد.`, `Auto-deleted ${num.format(autoDeleted)} configurations after two consecutive connection failures.`);
+    $("auto-delete-result").hidden = !autoDeleted;
+    $("auto-delete-result").textContent = deletedText;
     const eta = data.job.eta === null ? "" : L(` · حدود ${num.format(Math.ceil(data.job.eta / 60))} دقیقه باقی‌مانده`, ` · about ${num.format(Math.ceil(data.job.eta / 60))} min left`);
     $("job-text").textContent = `${data.job.cancelled ? L("در حال توقف", "Stopping") : L("در حال تست Real Delay", "Testing Real Delay")} · ${num.format(data.job.done)}/${num.format(data.job.total)} · ${L("هم‌زمان", "active")}: ${num.format(data.job.active)} · ${L("در صف", "queued")}: ${num.format(data.job.queued)}${eta}`;
     $("job-progress").max = Math.max(1, data.job.total); $("job-progress").value = data.job.done;
     $("cancel-test").disabled = data.job.cancelled;
-    if (wasRunning && !running) toast(data.job.cancelled ? L("تست متوقف شد؛ موارد تست‌نشده تغییر نکردند.", "Testing stopped. Queued configurations were left unchanged.") : L("تست فهرست تمام شد.", "Testing complete."));
-    if (data.full || data.configs.length || wasRunning !== running) { filterCache = null; render(); }
+    if (wasRunning && !running) toast(data.job.cancelled ? L("تست متوقف شد؛ موارد تست‌نشده تغییر نکردند.", "Testing stopped. Queued configurations were left unchanged.") : L("تست فهرست تمام شد.", "Testing complete.") + (autoDeleted ? " " + deletedText : ""));
+    if (data.full || data.configs.length || subscriptionsChanged || wasRunning !== running || wasSyncing !== subscriptionSync.running) { filterCache = null; render(); }
     else syncButtons();
+    if (subsDialog.open && !subWorking) await loadSubscriptions();
   } finally { fetching = false; }
 }
 async function startTest(ids) {
+  if (subscriptionSync.running) throw Error(L("تست پس از پایان دریافت ساب‌ها فعال می‌شود.", "Testing is available when subscription syncing finishes."));
   await api("/api/test", {ids, options: readTestOptions()});
   await refresh();
 }
 function readTestOptions() {
   return {workers:Number($("test-workers").value), samples:2,
     timeout:Number($("test-timeout").value), target:$("test-target").value,
-    gemini:$("test-gemini").checked, country:$("test-country").checked};
+    gemini:$("test-gemini").checked, country:$("test-country").checked,
+    auto_delete_failed:$("test-auto-delete-failed").checked};
 }
 const testStorageKey = "v2ray-desk-test-options-v3:" + BASE;
 try {
@@ -328,7 +378,7 @@ try {
     const select = $("test-" + key);
     if ([...select.options].some(o => o.value === String(saved[key]))) select.value = String(saved[key]);
   }
-  for (const key of ["gemini","country"]) if (typeof saved[key] === "boolean") $("test-" + key).checked = saved[key];
+  for (const key of ["gemini","country","auto_delete_failed"]) if (typeof saved[key] === "boolean") $("test-" + key.replaceAll("_", "-")).checked = saved[key];
 } catch {}
 document.querySelectorAll(".test-settings select,.test-settings input").forEach(input => input.addEventListener("change", () => {
   try { localStorage.setItem(testStorageKey, JSON.stringify(readTestOptions())); } catch {}
@@ -372,7 +422,8 @@ document.querySelectorAll(".close-dialog").forEach(button => button.addEventList
 for (const id of ["import-open", "empty-import"]) $(id).addEventListener("click", openImport);
 $("all-nav").addEventListener("click", () => { activeCountry = ""; resetView(); });
 $("country-filter").addEventListener("change", () => { activeCountry = $("country-filter").value; resetView(); });
-for (const id of ["search", "status-filter", "gemini-filter", "sort", "group"]) $(id).addEventListener(id === "search" ? "input" : "change", resetView);
+$("subscription-filter").addEventListener("change", () => { activeSubscription = $("subscription-filter").value; resetView(); });
+for (const id of ["search", "protocol-filter", "status-filter", "gemini-filter", "sort", "group"]) $(id).addEventListener(id === "search" ? "input" : "change", resetView);
 $("prev-page").addEventListener("click", () => { page--; render(); });
 $("next-page").addEventListener("click", () => { page++; render(); });
 $("select-page").addEventListener("change", () => {
@@ -421,9 +472,10 @@ $("edit-form").addEventListener("submit", action(async event => {
   $("edit-dialog").close(); toast(L("تغییرات ذخیره شد؛ کانفیگ را دوباره تست کنید.", "Changes saved. Test the configuration again.")); await refresh();
 }));
 $("export-btn").addEventListener("click", action(async () => {
-  const response = await api("/api/export", {ids: scope().map(row => row.id)});
+  const format = $("export-format").value;
+  const response = await api("/api/export", {ids: scope().map(row => row.id), format});
   const url = URL.createObjectURL(await response.blob());
-  const anchor = node("a"); anchor.href = url; anchor.download = "v2ray-configs.txt";
+  const anchor = node("a"); anchor.href = url; anchor.download = format === "base64" ? "v2ray-configs-base64.txt" : "v2ray-configs.txt";
   document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }));
 $("report-btn").addEventListener("click", action(async () => {
@@ -470,15 +522,22 @@ subsForm.append(enabledLabel,subActions);
 const subsRefreshAll = node("button",L("به‌روزرسانی ساب‌های فعال","Refresh enabled subscriptions"),"secondary");
 const subsList = node("div", undefined, "subscription-list");
 const subsStatus = node("p", "", "hint"); subsStatus.setAttribute("role","status");
-subsDialog.append(subsHeading,node("p",L("لینک مستقیم یا Base64؛ حداکثر ۲۰۰۰ کانفیگ در هر ساب. کانفیگ‌های دستی و ویرایش‌شده هنگام همگام‌سازی حفظ می‌شوند.","Plain text or Base64; up to 2,000 configurations per subscription. Manual and edited configurations are preserved during sync."),"muted"),subsForm,subsStatus,subsRefreshAll,subsList);
+const subsProgress = node("p", "", "hint"); subsProgress.setAttribute("role", "status"); subsProgress.hidden = true;
+const presetList = node("div", undefined, "subscription-list");
+subsDialog.append(subsHeading,node("p",L("لینک مستقیم یا Base64؛ حداکثر ۲۰۰۰ کانفیگ در هر ساب. کانفیگ‌های دستی و ویرایش‌شده هنگام همگام‌سازی حفظ می‌شوند.","Plain text or Base64; up to 2,000 configurations per subscription. Manual and edited configurations are preserved during sync."),"muted"),subsProgress,
+  node("h3", L("منابع آماده", "Built-in sources")),
+  node("p", L("منابع آماده در اولین اجرا ثبت و منابع فعال دریافت می‌شوند. منابع حذف‌شدهٔ هر ارائه‌دهنده را می‌توانید دوباره اضافه کنید.", "Built-in sources are registered on first run and enabled sources are synced. Restore missing sources from each provider below."), "hint"),presetList,
+  subsForm,subsStatus,subsRefreshAll,subsList);
 document.body.append(subsDialog);
-let subscriptionId = null, subWorking = false;
+let subscriptionId = null, subWorking = false, subsListSignature = "";
 function syncSubscriptionControls() {
-  for (const control of [subName, subUrl, subEnabled, subSubmit, subReset, subsRefreshAll]) control.disabled = subWorking;
-  for (const button of subsList.querySelectorAll("button")) button.disabled = subWorking || button.dataset.syncing === "true";
+  const busy = subWorking || running || subscriptionSync.running;
+  for (const control of [subName, subUrl, subEnabled, subSubmit, subReset, subsRefreshAll]) control.disabled = busy;
+  for (const button of subsList.querySelectorAll("button")) button.disabled = busy || button.dataset.syncing === "true";
+  for (const button of presetList.querySelectorAll("button")) button.disabled = busy || button.dataset.missing === "0";
 }
 async function withSubscriptionLock(fn) {
-  if (subWorking) return;
+  if (subWorking || running || subscriptionSync.running) return;
   subWorking = true; syncSubscriptionControls();
   try { await fn(); }
   finally {
@@ -490,7 +549,26 @@ function resetSubForm() {
   subscriptionId = null; subsForm.reset(); subEnabled.checked = true;
   subSubmit.textContent = L("افزودن و دریافت","Add & sync");
 }
-subReset.onclick = () => { if (!subWorking) resetSubForm(); };
+subReset.onclick = () => { if (!subWorking && !running && !subscriptionSync.running) resetSubForm(); };
+async function loadPresetCatalog() {
+  const data = await (await api("/api/subscriptions/presets")).json();
+  updateSubscriptionProgress(data.subscription_sync);
+  presetList.replaceChildren();
+  for (const provider of data.providers || []) {
+    const card = node("article", undefined, "subscription-card");
+    card.append(node("strong", provider.name), node("p", L(`${num.format(provider.installed)} از ${num.format(provider.total)} منبع اضافه شده`, `${num.format(provider.installed)} of ${num.format(provider.total)} sources added`), "hint"));
+    const button = node("button", provider.missing ? L(`افزودن منابع باقی‌مانده (${num.format(provider.missing)})`, `Add missing sources (${num.format(provider.missing)})`) : L("همهٔ منابع اضافه شده‌اند", "All sources added"), "secondary");
+    button.dataset.missing = String(provider.missing);
+    button.onclick = action(() => withSubscriptionLock(async () => {
+      const result = await (await api("/api/subscriptions/presets", {provider:provider.id})).json();
+      updateSubscriptionProgress(result.subscription_sync);
+      subsStatus.textContent = L(`${num.format(result.added)} منبع اضافه شد؛ ${num.format(result.queued)} منبع در صف دریافت.`, `Added ${num.format(result.added)} sources; ${num.format(result.queued)} queued for sync.`);
+      await loadPresetCatalog(); await refresh();
+    }));
+    card.append(button); presetList.append(card);
+  }
+  syncSubscriptionControls();
+}
 async function syncSubscription(id) {
   subsStatus.textContent = L("در حال دریافت ساب…","Downloading subscription…");
   const data = await (await api(`/api/subscriptions/${id}/refresh`,{})).json();
@@ -499,6 +577,12 @@ async function syncSubscription(id) {
 }
 async function loadSubscriptions() {
   const data = await (await api("/api/subscriptions")).json();
+  const changed = updateSubscriptions(data.subscriptions);
+  updateSubscriptionProgress(data.subscription_sync);
+  if (changed) render(); else syncButtons();
+  const signature = JSON.stringify(data.subscriptions);
+  if (signature === subsListSignature) return data.subscriptions;
+  subsListSignature = signature;
   subsList.replaceChildren();
   if (!data.subscriptions.length) subsList.append(node("p",L("هنوز سابی اضافه نشده است.","No subscriptions yet."),"muted"));
   for (const sub of data.subscriptions) {
@@ -521,13 +605,13 @@ async function loadSubscriptions() {
         if (choice === null) return;
         await api(`/api/subscriptions/${sub.id}`,{remove_configs:choice},"DELETE");
         if (subscriptionId === sub.id) resetSubForm();
-        await refresh();
+        await loadPresetCatalog(); await refresh();
       }]
     ];
     for (const [label, fn, focusAfter] of controls) {
       const button = node("button",label,"secondary");
       button.dataset.syncing = String(!!sub.syncing);
-      button.disabled = subWorking || sub.syncing;
+      button.disabled = subWorking || running || subscriptionSync.running || sub.syncing;
       button.onclick = action(async () => {
         await withSubscriptionLock(fn);
         if (!subWorking) focusAfter?.focus();
@@ -555,7 +639,7 @@ function chooseSubRemoval(name) {
     dialog.append(actions); document.body.append(dialog); openDialog(dialog);
   });
 }
-$("subscriptions-open").onclick = action(async () => { await loadSubscriptions(); openDialog(subsDialog); });
+$("subscriptions-open").onclick = action(async () => { await loadSubscriptions(); await loadPresetCatalog(); openDialog(subsDialog); });
 subsForm.onsubmit = action(async event => {
   event.preventDefault();
   await withSubscriptionLock(async () => {
@@ -574,3 +658,80 @@ subsRefreshAll.onclick = action(() => withSubscriptionLock(async () => {
   }
   subsStatus.textContent = L(`به‌روزرسانی تمام شد؛ ${failures} خطا.`,`Refresh complete; ${failures} failed.`);
 }));
+
+const scheduleDialog = node("dialog"); scheduleDialog.id = "automation-dialog";
+const scheduleHeading = node("div", undefined, "dialog-heading");
+const scheduleClose = node("button", "×", "icon-button"); scheduleClose.type = "button";
+scheduleClose.setAttribute("aria-label", L("بستن", "Close")); scheduleClose.onclick = () => scheduleDialog.close();
+scheduleHeading.append(node("h2", L("برنامهٔ روزانه", "Daily schedule")), scheduleClose);
+const scheduleForm = node("form");
+const scheduleEnabled = node("input"), scheduleTime = node("input"), scheduleWorkers = node("select"), scheduleDelete = node("input");
+scheduleEnabled.type = "checkbox"; scheduleEnabled.id = "schedule-enabled";
+scheduleTime.type = "time"; scheduleTime.id = "schedule-time"; scheduleTime.required = true;
+scheduleWorkers.id = "schedule-workers";
+scheduleDelete.type = "checkbox"; scheduleDelete.id = "schedule-auto-delete";
+for (const count of [1,4,8,16,32,64,100,128]) { const option = node("option", num.format(count)); option.value = String(count); scheduleWorkers.append(option); }
+for (const [input, labelText] of [[scheduleEnabled,L("اجرای روزانه فعال باشد", "Enable daily run")],
+  [scheduleTime,L("زمان اجرا", "Run time")],[scheduleWorkers,L("تست هم‌زمان", "Parallel tests")],
+  [scheduleDelete,L("حذف خودکار اتصال‌های ناموفق", "Auto-delete failed connections")]]) {
+  const label = node("label", input.type === "checkbox" ? undefined : labelText, input.type === "checkbox" ? "group-toggle" : undefined);
+  label.htmlFor = input.id;
+  if (input.type === "checkbox") { label.append(input, document.createTextNode(labelText)); scheduleForm.append(label); }
+  else scheduleForm.append(label, input);
+}
+const scheduleTimezone = node("p", "", "hint");
+const scheduleStatus = node("div", undefined, "hint"); scheduleStatus.setAttribute("role", "status");
+const scheduleError = node("p", "", "subscription-error"); scheduleError.setAttribute("role", "alert"); scheduleError.hidden = true;
+const scheduleSubmit = node("button", L("ذخیرهٔ برنامه", "Save schedule"), "primary"); scheduleSubmit.type = "submit";
+const scheduleFooter = node("div", undefined, "dialog-footer"); scheduleFooter.append(scheduleSubmit);
+scheduleForm.append(node("p", L("حذف پس از دو شکست پیاپی اتصال در تست‌های کامل انجام می‌شود؛ خطای جمینای، خطای هسته و تست متوقف‌شده حساب نمی‌شوند.", "Deletion requires two consecutive connection failures in completed tests; Gemini errors, core errors and stopped tests do not count."), "hint"), scheduleTimezone, scheduleFooter);
+scheduleDialog.append(scheduleHeading, node("p", L("هر روز ابتدا ساب‌های فعال به‌روز می‌شوند؛ سپس همهٔ کانفیگ‌ها با Real Delay، تشخیص کشور و بررسی جمینای تست می‌شوند.", "Each day, enabled subscriptions are refreshed, then all configurations are tested with Real Delay, country detection and Gemini checks."), "muted"), scheduleForm, scheduleStatus, scheduleError);
+document.body.append(scheduleDialog);
+let scheduleWorking = false;
+function setScheduleWorking(value) {
+  scheduleWorking = value;
+  for (const control of [scheduleEnabled,scheduleTime,scheduleWorkers,scheduleDelete,scheduleSubmit,$("automation-open")]) control.disabled = value;
+}
+function scheduleDate(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat(EN ? "en-US" : "fa-IR", {dateStyle:"medium", timeStyle:"short", timeZone:"Asia/Tehran"}).format(date);
+}
+function renderSchedule(data) {
+  scheduleEnabled.checked = data.enabled === true;
+  scheduleTime.value = data.time;
+  const workerValue = String(data.workers);
+  if (![...scheduleWorkers.options].some(option => option.value === workerValue)) {
+    const option = node("option", num.format(data.workers)); option.value = workerValue; scheduleWorkers.append(option);
+  }
+  scheduleWorkers.value = workerValue;
+  scheduleDelete.checked = data.auto_delete_failed === true;
+  scheduleTimezone.textContent = L("منطقهٔ زمانی: Asia/Tehran", "Time zone: Asia/Tehran");
+  const phase = {idle:L("آماده", "Ready"),refreshing:L("در حال دریافت ساب‌ها", "Refreshing subscriptions"),testing:L("در حال تست همهٔ کانفیگ‌ها", "Testing all configurations")}[data.phase] || data.phase;
+  scheduleStatus.replaceChildren(node("p", L(`وضعیت: ${phase}`, `Status: ${phase}`)),
+    node("p", L(`اجرای بعدی: ${scheduleDate(data.next_run)}`, `Next run: ${scheduleDate(data.next_run)}`)),
+    node("p", L(`آخرین اجرا: ${scheduleDate(data.last_completed)}`, `Last run: ${scheduleDate(data.last_completed)}`)));
+  if (data.last_summary) {
+    const summary = data.last_summary;
+    scheduleStatus.append(node("p", L(`${num.format(summary.subscriptions)} ساب · ${num.format(summary.subscription_errors)} خطای ساب · ${num.format(summary.tested)} تست · ${num.format(summary.auto_deleted)} حذف خودکار`,
+      `${num.format(summary.subscriptions)} subscriptions · ${num.format(summary.subscription_errors)} subscription errors · ${num.format(summary.tested)} tested · ${num.format(summary.auto_deleted)} auto-deleted`)));
+  }
+  scheduleError.hidden = !data.last_error; scheduleError.textContent = data.last_error || "";
+}
+$("automation-open").onclick = action(async () => {
+  if (scheduleWorking) return;
+  setScheduleWorking(true);
+  try { renderSchedule(await (await api("/api/automation")).json()); openDialog(scheduleDialog); }
+  finally { setScheduleWorking(false); }
+});
+scheduleForm.onsubmit = action(async event => {
+  event.preventDefault();
+  if (scheduleWorking) return;
+  setScheduleWorking(true);
+  try {
+    const data = await (await api("/api/automation", {enabled:scheduleEnabled.checked,time:scheduleTime.value,
+      workers:Number(scheduleWorkers.value),auto_delete_failed:scheduleDelete.checked}, "PUT")).json();
+    renderSchedule(data); toast(L("برنامهٔ روزانه ذخیره شد.", "Daily schedule saved."));
+  } finally { setScheduleWorking(false); }
+});
