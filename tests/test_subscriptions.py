@@ -88,41 +88,70 @@ def test_subscription_private_address_blocked():
         fetch_subscription("http://127.0.0.1/x")
 
 
+class AsyncResponse:
+    def __init__(self, status=200, headers=None, body=b""):
+        self.status, self.headers, self.body = status, headers or {}, body
+        self.content = self
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): pass
+    async def iter_chunked(self, size):
+        for offset in range(0, len(self.body), size):
+            yield self.body[offset:offset + size]
+
+
+def fake_client(monkeypatch, handler):
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["trust_env"] is False and kwargs["auto_decompress"] is False
+            self.connector = kwargs["connector"]
+            assert self.connector._ssl.check_hostname
+            import ssl
+            assert self.connector._ssl.verify_mode == ssl.CERT_REQUIRED
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): await self.connector.close()
+        def get(self, url, **kwargs):
+            assert kwargs["allow_redirects"] is False
+            return handler(url, kwargs)
+    monkeypatch.setattr("panel.subscriptions.aiohttp.ClientSession", Client)
+
+
 def test_redirect_revalidates_private_destination(monkeypatch):
-    class Response:
-        status = 302
-        headers = {"Location": "http://127.0.0.1/private"}
-        def close(self): pass
-    class Pool:
-        def __init__(self, host, **kwargs): assert host == "1.1.1.1"
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-        def request(self, *args, **kwargs):
-            assert kwargs["redirect"] is False
-            return Response()
     from panel.tester import public_address
+    def handler(url, options):
+        assert str(url) == "http://1.1.1.1/feed"
+        return AsyncResponse(302, {"Location": "http://127.0.0.1/private"})
     monkeypatch.setattr("panel.subscriptions.public_address",
                         lambda host, port: "1.1.1.1" if host == "example.com" else public_address(host, port))
-    monkeypatch.setattr("panel.subscriptions.urllib3.HTTPConnectionPool", Pool)
+    fake_client(monkeypatch, handler)
     with pytest.raises(ConfigError):
         fetch_subscription("http://example.com/feed")
 
 
 def test_size_limit_and_tls_host_pinning(monkeypatch):
-    class Response:
-        status = 200
-        headers = {}
-        def close(self): pass
-        def read(self, *a, **k): return b"x" * 65536
-    class Pool:
-        def __init__(self, host, **kwargs):
-            assert host == "1.1.1.1"
-            assert kwargs["server_hostname"] == "example.com"
-            assert kwargs["assert_hostname"] == "example.com"
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-        def request(self, *a, **k): return Response()
+    def handler(url, options):
+        assert str(url) == "https://1.1.1.1/sub?token=secret"
+        assert options["server_hostname"] == "example.com"
+        assert options["headers"]["Host"] == "example.com:443"
+        return AsyncResponse(body=b"x" * 65537)
     monkeypatch.setattr("panel.subscriptions.public_address", lambda *a: "1.1.1.1")
-    monkeypatch.setattr("panel.subscriptions.urllib3.HTTPSConnectionPool", Pool)
+    monkeypatch.setattr("panel.subscriptions.LIMIT", 65536)
+    fake_client(monkeypatch, handler)
     with pytest.raises(ConfigError, match="4 MB"):
         fetch_subscription(URL)
+
+
+def test_https_downgrade_rejected_before_second_connection(monkeypatch):
+    calls = []
+    def handler(url, options):
+        calls.append(str(url))
+        return AsyncResponse(302, {"Location": "http://example.com/plain"})
+    monkeypatch.setattr("panel.subscriptions.public_address", lambda *a: "1.1.1.1")
+    fake_client(monkeypatch, handler)
+    with pytest.raises(ConfigError, match="downgrade"):
+        fetch_subscription(URL)
+    assert len(calls) == 1
+
+
+def test_zero_subscription_port_is_rejected():
+    with pytest.raises(ConfigError):
+        validate_url("https://example.com:0/sub")

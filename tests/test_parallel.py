@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -71,6 +72,42 @@ def test_completed_results_are_not_held_behind_slow_first_worker(client, monkeyp
     finally:
         release.set()
     wait_until(lambda: not manager.snapshot()["running"])
+
+
+@pytest.mark.parametrize("failure", ["invalid_label", "resolver_error", "resolver_unicode_error"])
+def test_bad_host_does_not_abandon_valid_batch_neighbor(client, monkeypatch, failure):
+    manager = client.application.extensions["tester"]
+    bad_host = "a" * 64 + ".example.com" if failure == "invalid_label" else "unavailable.example.com"
+    # An older database may contain a hostname now rejected by the parser.
+    with connect(manager.db_path) as db:
+        for name, host in [("bad", bad_host), ("valid", "example.com")]:
+            db.execute("""INSERT INTO configs(uri,name,protocol,host,port,fingerprint)
+                VALUES (?,?, 'vless', ?,443,?)""", (LINK.replace("example.com", host), name, host, name))
+        ids = [row[0] for row in db.execute("SELECT id FROM configs ORDER BY id")]
+
+    def resolve(host, *args, **kwargs):
+        if host == bad_host:
+            assert failure != "invalid_label", "Invalid labels must be rejected before DNS resolution"
+            error = UnicodeError if failure == "resolver_unicode_error" else OSError
+            raise error("Synthetic resolver failure")
+        return [(2, 1, 6, "", ("1.1.1.1", 443))]
+
+    @contextmanager
+    def core(prepared, executable, stop):
+        yield {row["id"]: 12345 for row in prepared}
+
+    monkeypatch.setattr(tester.socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(tester.shutil, "which", lambda _: "/xray")
+    monkeypatch.setattr(tester, "shared_core", core)
+    monkeypatch.setattr(tester, "probe_connection", lambda *args, **kwargs: tester.result("healthy", latency_ms=100))
+    manager.start(ids, {"workers": 2, "country": False, "gemini": False})
+    wait_until(lambda: not manager.snapshot()["running"])
+    assert manager.snapshot()["done"] == 2
+    with connect(manager.db_path) as db:
+        rows = db.execute("SELECT name,status,error FROM configs ORDER BY id").fetchall()
+    assert rows[0]["status"] == ("invalid" if failure == "invalid_label" else "error")
+    assert rows[0]["error"]
+    assert rows[1]["status"] == "healthy"
 
 
 @pytest.mark.parametrize("options", [{"workers": 0}, {"workers": 33}, {"workers": True},

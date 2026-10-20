@@ -1,14 +1,34 @@
 """Real HTTP behavior of the two-request timer, without external websites."""
 import asyncio
+import gc
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import time
 import socketserver
+import warnings
 
 import aiohttp
 import pytest
 
 from panel import delay
+
+
+def test_already_cancelled_delay_closes_request_without_starting(monkeypatch):
+    entered = []
+
+    async def requests(*args):
+        entered.append(True)
+
+    monkeypatch.setattr(delay, "_requests", requests)
+    stop = threading.Event()
+    stop.set()
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        with pytest.raises(TimeoutError):
+            delay.measure_delay(1, "https://example.com", 1, stop)
+        gc.collect()
+    assert not entered
+    assert not [item for item in recorded if "was never awaited" in str(item.message)]
 
 
 @pytest.fixture

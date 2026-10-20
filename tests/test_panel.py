@@ -6,7 +6,6 @@ import time
 from contextlib import nullcontext
 
 import pytest
-import requests
 from werkzeug.security import generate_password_hash
 
 from panel.app import create_app
@@ -59,6 +58,34 @@ def test_base64_and_vmess():
     assert parsed["outbound"]["streamSettings"]["wsSettings"]["headers"]["Host"] == "cdn.example.com"
     subscription = base64.b64encode((raw + "\n" + LINK).encode()).decode()
     assert len(import_lines(subscription)) == 2
+
+
+def test_malformed_vmess_line_does_not_abort_valid_import(client):
+    data = add(client, "vmess\n" + LINK)
+    assert data["added"] == 1
+    assert [error["line"] for error in data["errors"]] == [1]
+
+
+@pytest.mark.parametrize("host", ["a" * 64 + ".example.com", "é" * 60 + ".example.com", "empty..example.com"])
+def test_reject_invalid_dns_labels(host):
+    with pytest.raises(ConfigError):
+        parse_uri(LINK.replace("example.com", host))
+
+
+@pytest.mark.parametrize("host", ["bücher.example", "example.com.", "1.1.1.1", "[2606:4700:4700::1111]"])
+def test_domain_validation_preserves_supported_hosts(host):
+    parsed = parse_uri(LINK.replace("example.com", host))
+    assert parsed["host"] == host.strip("[]")
+
+
+@pytest.mark.parametrize("password", ["pass%41", "pass#word", "pass?word", "pass@word:extra"])
+def test_legacy_shadowsocks_preserves_literal_credentials(password):
+    authority = f"aes-256-gcm:{password}@example.com:8388"
+    encoded = base64.b64encode(authority.encode()).decode()
+    parsed = parse_uri(f"ss://{encoded}#legacy%20name")
+    server = parsed["outbound"]["settings"]["servers"][0]
+    assert server == {"address": "example.com", "port": 8388, "method": "aes-256-gcm", "password": password}
+    assert parsed["name"] == "legacy name"
 
 
 @pytest.mark.parametrize("link", [
@@ -231,18 +258,12 @@ class FakeResponse:
     (302, "http://example.com", "redirect"), (500, None, "other"),
 ])
 def test_gemini_classification_and_no_direct_fallback(monkeypatch, code, location, expected):
-    class Client:
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def get(self, url, **kwargs):
-            assert self.trust_env is False
-            assert self.proxies["https"] == "socks5h://127.0.0.1:12345"
-            assert kwargs["allow_redirects"] is False
-            return FakeResponse(code, location)
-    monkeypatch.setattr(requests, "Session", Client)
+    def request(port, target, timeout, **kwargs):
+        assert port == 12345 and target == "https://gemini.google.com/app"
+        return code, {"Location": location} if location else {}, b""
+    monkeypatch.setattr("panel.tester.proxy_get", request)
     assert probe_gemini(12345, 2) == (expected, code)
+
 
 
 def test_background_job_persists_result(client, monkeypatch):
