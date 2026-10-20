@@ -23,7 +23,17 @@ def connect(path):
 def initialize(data_dir):
     folder = Path(data_dir)
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    folder.chmod(0o700)
     path = folder / "panel.sqlite3"
+    path.touch(mode=0o600, exist_ok=True)
+    path.chmod(0o600)
+    # Repair existing sidecars before SQLite opens them. New sidecars inherit
+    # the database's private mode, independently of the process umask.
+    for suffix in ("-wal", "-shm", "-journal"):
+        try:
+            path.with_name(path.name + suffix).chmod(0o600)
+        except FileNotFoundError:
+            pass
     with connect(path) as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.executescript("""

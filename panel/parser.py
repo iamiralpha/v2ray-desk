@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import ipaddress
 import json
 import re
 import uuid
@@ -32,6 +33,15 @@ def hostname(value):
     value = str(value or "").strip().strip("[]")
     if not value or len(value) > 253 or re.search(r"[\s/@\\?#\x00-\x1f]", value):
         raise ConfigError("آدرس سرور معتبر نیست.")
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        try:
+            encoded = value.encode("idna").decode("ascii")
+            if len(encoded.rstrip(".")) > 253:
+                raise UnicodeError()
+        except UnicodeError:
+            raise ConfigError("آدرس سرور معتبر نیست.") from None
     return value
 
 
@@ -109,7 +119,7 @@ def stream(options, host, default_security="none"):
 
 def parse_uri(raw):
     raw = str(raw or "").strip()
-    if not raw or len(raw) > 16384 or re.search(r"[\r\n\x00]", raw):
+    if not raw or "://" not in raw or len(raw) > 16384 or re.search(r"[\r\n\x00]", raw):
         raise ConfigError("هر کانفیگ باید یک لینک معتبر در یک خط باشد.")
     scheme = raw.split("://", 1)[0].lower()
     if scheme not in {"vmess", "vless", "trojan", "ss"}:
@@ -147,9 +157,15 @@ def parse_uri(raw):
         else:
             # Legacy Shadowsocks encodes the entire method:password@host:port.
             value = raw
+            legacy_credential = None
             if scheme == "ss" and "@" not in raw.split("#", 1)[0]:
                 encoded, _, fragment = raw[5:].partition("#")
-                value = "ss://" + decode64(encoded) + ("#" + fragment if fragment else "")
+                legacy_credential, separator, server = decode64(encoded).rpartition("@")
+                if not separator or not legacy_credential:
+                    raise ConfigError("اطلاعات ورود کانفیگ وجود ندارد.")
+                # The decoded credential is literal text, not URL userinfo.
+                # In particular, %, # and ? are valid password characters.
+                value = "ss://" + server + ("#" + fragment if fragment else "")
             url = urlsplit(value)
             host, port = hostname(url.hostname), port_number(url.port)
             pairs = parse_qsl(url.query, keep_blank_values=True)
@@ -162,8 +178,8 @@ def parse_uri(raw):
             if set(options) - allowed:
                 raise ConfigError("لینک تنظیمات اضافی پشتیبانی‌نشده دارد.")
             name = unquote(url.fragment) or host
-            credential = unquote(url.netloc.rsplit("@", 1)[0])
-            if "@" not in url.netloc or not credential:
+            credential = legacy_credential if legacy_credential is not None else unquote(url.netloc.rsplit("@", 1)[0])
+            if not credential or (legacy_credential is None and "@" not in url.netloc):
                 raise ConfigError("اطلاعات ورود کانفیگ وجود ندارد.")
             if scheme in {"vless", "trojan"}:
                 transport = stream(options, host, "tls" if scheme == "trojan" else "none")

@@ -16,11 +16,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
-import requests
+import aiohttp
 
 from .parser import ConfigError, parse_uri
 from .store import connect
 from .delay import measure_delay
+from .http_probe import proxy_get
 
 TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 GEMINI_URL = "https://gemini.google.com/app"
@@ -87,63 +88,46 @@ def test_options(options=None):
     return values
 
 
-def proxy_session(port):
-    client = requests.Session()
-    client.trust_env = False
-    client.proxies = {"http": f"socks5h://127.0.0.1:{port}",
-                      "https": f"socks5h://127.0.0.1:{port}"}
-    return client
-
-
-def lookup_country(port, timeout):
+def lookup_country(port, timeout, stop=None):
     try:
-        with proxy_session(port) as client:
-            started = time.monotonic()
-            with client.get(TRACE_URL, timeout=(timeout, timeout), stream=True,
-                            allow_redirects=False) as response:
-                if response.status_code != 200:
-                    return None, None
-                content = bytearray()
-                for chunk in response.iter_content(1024):
-                    content.extend(chunk)
-                    if len(content) > 16384 or time.monotonic() - started > timeout * 2:
-                        return None, None
-            trace = dict(line.split("=", 1) for line in content.decode("utf-8").splitlines() if "=" in line)
-            address = ipaddress.ip_address(trace.get("ip", ""))
-            if not address.is_global:
-                return None, None
-            country = trace.get("loc", "").upper()
-            return country if len(country) == 2 and country.isascii() and country.isalpha() else None, str(address)
-    except (requests.RequestException, ValueError, UnicodeError):
+        code, _, content = proxy_get(port, TRACE_URL, timeout * 2, limit=16384, stop=stop)
+        if code != 200:
+            return None, None
+        trace = dict(line.split("=", 1) for line in content.decode("utf-8").splitlines() if "=" in line)
+        address = ipaddress.ip_address(trace.get("ip", ""))
+        if not address.is_global:
+            return None, None
+        country = trace.get("loc", "").upper()
+        return country if len(country) == 2 and country.isascii() and country.isalpha() else None, str(address)
+    except (aiohttp.ClientError, OSError, ValueError, UnicodeError):
         return None, None
 
 
 def probe_gemini(port, timeout, stop=None):
     """HTTP accessibility only; never claim an account can use Gemini."""
     try:
-        with requests.Session() as client:
-            client.trust_env = False
-            client.proxies = {"http": f"socks5h://127.0.0.1:{port}",
-                              "https": f"socks5h://127.0.0.1:{port}"}
-            target = GEMINI_URL
-            deadline = time.monotonic() + timeout * 2
-            for _ in range(6):
-                remaining = min(timeout, deadline - time.monotonic())
-                if remaining <= 0 or (stop and stop.is_set()):
-                    return "unreachable", None
-                with client.get(target, timeout=(remaining, remaining), stream=True, allow_redirects=False) as response:
-                    code = response.status_code
-                    if code in {301, 302, 303, 307, 308}:
-                        target = urljoin(target, response.headers.get("Location", ""))
-                        parsed = urlsplit(target)
-                        if parsed.scheme != "https" or not (parsed.hostname or "").endswith(".google.com"):
-                            return "redirect", code
-                        if parsed.hostname == "accounts.google.com":
-                            return "login", code
-                        continue
-                    return {403: "blocked", 429: "limited", 200: "http200"}.get(code, "other"), code
-            return "redirect", code
-    except requests.RequestException:
+        target = GEMINI_URL
+        deadline = time.monotonic() + timeout * 2
+        for _ in range(6):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or (stop and stop.is_set()):
+                return "unreachable", None
+            code, headers, _ = proxy_get(port, target, remaining, stop=stop)
+            if code in {301, 302, 303, 307, 308}:
+                location = headers.get("Location")
+                if not location:
+                    return "redirect", code
+                target = urljoin(target, location)
+                parsed = urlsplit(target)
+                if (parsed.scheme != "https" or parsed.username is not None or parsed.password is not None
+                        or not (parsed.hostname or "").endswith(".google.com")):
+                    return "redirect", code
+                if parsed.hostname == "accounts.google.com":
+                    return "login", code
+                continue
+            return {403: "blocked", 429: "limited", 200: "http200"}.get(code, "other"), code
+        return "redirect", code
+    except (aiohttp.ClientError, OSError, ValueError):
         return "unreachable", None
 
 
@@ -156,7 +140,7 @@ def public_address(host, port):
     try:
         addresses = list(dict.fromkeys(entry[4][0] for entry in socket.getaddrinfo(
             host, port, type=socket.SOCK_STREAM)))
-    except socket.gaierror:
+    except (OSError, UnicodeError):
         raise ConfigError("نام دامنهٔ سرور پیدا نشد.") from None
     if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
         raise ConfigError("تست آدرس‌های محلی، خصوصی و رزروشده مجاز نیست.")
@@ -253,7 +237,7 @@ def probe_connection(port, stop, timeout=5, samples=2, target="google", gemini=T
         pass
     if stop.is_set():
         return result("error", "تست متوقف شد.")
-    country_code, exit_ip = lookup_country(port, timeout) if country and latency else (None, None)
+    country_code, exit_ip = lookup_country(port, timeout, stop) if country and latency else (None, None)
     if stop.is_set():
         return result("error", "تست متوقف شد.")
     gemini_status, gemini_code = probe_gemini(port, timeout, stop) if gemini else ("untested", None)

@@ -1,15 +1,21 @@
 """Bounded subscription downloads and transactional source reconciliation."""
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import ssl
-import time
 from urllib.parse import urljoin, urlsplit
 
 import certifi
-import urllib3
+import aiohttp
+from yarl import URL
 
 from .parser import ConfigError, import_lines, parse_uri
 from .tester import public_address
+from .http_probe import BodyTooLarge, read_limited, run_bounded
 
 LIMIT = 4 * 1024 * 1024
+DOWNLOAD_TIMEOUT = 45
+# A bounded resolver pool keeps an OS DNS stall out of the HTTP worker's deadline.
+DNS_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="subscription-dns")
 
 
 def validate_url(url):
@@ -20,7 +26,7 @@ def validate_url(url):
         if (parts.scheme not in {"http", "https"} or not parts.hostname or
                 parts.username is not None or parts.password is not None or parts.fragment):
             raise ValueError()
-        port = parts.port or (443 if parts.scheme == "https" else 80)
+        port = parts.port if parts.port is not None else (443 if parts.scheme == "https" else 80)
         if not 1 <= port <= 65535:
             raise ValueError()
     except ValueError:
@@ -29,58 +35,46 @@ def validate_url(url):
 
 
 def fetch_subscription(url):
-    started = time.monotonic()
     try:
-        for redirect in range(5):
-            parts, port = validate_url(url)
-            address = public_address(parts.hostname, port)
-            options = dict(port=port, timeout=urllib3.Timeout(connect=6, read=12), retries=False)
-            if parts.scheme == "https":
-                pool = urllib3.HTTPSConnectionPool(
-                    address, server_hostname=parts.hostname, assert_hostname=parts.hostname,
-                    cert_reqs=ssl.CERT_REQUIRED, ca_certs=certifi.where(), **options)
-            else:
-                pool = urllib3.HTTPConnectionPool(address, **options)
-            host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
-            target = parts.path or "/"
-            if parts.query:
-                target += "?" + parts.query
-            with pool:
-                response = pool.request("GET", target, headers={
-                    "Host": f"{host}:{port}", "User-Agent": "V2Ray-Desk/1.0",
-                    "Accept": "text/plain", "Accept-Encoding": "identity",
-                }, redirect=False, preload_content=False)
-                try:
-                    if response.status in {301, 302, 303, 307, 308}:
-                        location = response.headers.get("Location")
-                        if not location or redirect == 4:
-                            raise ConfigError("Subscription redirect limit reached.")
-                        next_url = urljoin(url, location)
-                        if parts.scheme == "https" and urlsplit(next_url).scheme != "https":
-                            raise ConfigError("Subscription HTTPS downgrade was blocked.")
-                        url = next_url
-                        continue
-                    if response.status != 200:
-                        raise ConfigError(f"Subscription HTTP {response.status}.")
-                    chunks, total = [], 0
-                    while True:
-                        if time.monotonic() - started > 45:
-                            raise ConfigError("Subscription download timed out.")
-                        chunk = response.read(65536, decode_content=True)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        if total > LIMIT:
-                            raise ConfigError("Subscription exceeds 4 MB.")
-                        chunks.append(chunk)
-                    return b"".join(chunks).decode("utf-8-sig")
-                finally:
-                    response.close()
+        return run_bounded(_download(url), DOWNLOAD_TIMEOUT)
     except ConfigError:
         raise
+    except TimeoutError:
+        raise ConfigError("Subscription download timed out.") from None
+    except BodyTooLarge:
+        raise ConfigError("Subscription exceeds 4 MB.") from None
     except Exception:
         # URLs can contain credentials; never include the network exception.
         raise ConfigError("Subscription download failed.") from None
+
+
+async def _download(url):
+    context = ssl.create_default_context(cafile=certifi.where())
+    async with aiohttp.ClientSession(trust_env=False, auto_decompress=False,
+                                    timeout=aiohttp.ClientTimeout(total=None, sock_connect=6, sock_read=12),
+                                    connector=aiohttp.TCPConnector(ssl=context)) as client:
+        for redirect in range(5):
+            parts, port = validate_url(url)
+            address = await asyncio.get_running_loop().run_in_executor(DNS_POOL, public_address, parts.hostname, port)
+            host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+            target = URL(url, encoded=True).with_host(address)
+            options = {"server_hostname": parts.hostname} if parts.scheme == "https" else {}
+            async with client.get(target, headers={
+                    "Host": f"{host}:{port}", "User-Agent": "V2Ray-Desk/1.3",
+                    "Accept": "text/plain", "Accept-Encoding": "identity",
+                }, allow_redirects=False, **options) as response:
+                if response.status in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location")
+                    if not location or redirect == 4:
+                        raise ConfigError("Subscription redirect limit reached.")
+                    next_url = urljoin(url, location)
+                    if parts.scheme == "https" and urlsplit(next_url).scheme != "https":
+                        raise ConfigError("Subscription HTTPS downgrade was blocked.")
+                    url = next_url
+                    continue
+                if response.status != 200:
+                    raise ConfigError(f"Subscription HTTP {response.status}.")
+                return (await read_limited(response, LIMIT)).decode("utf-8-sig")
 
 
 def reconcile(db, subscription_id, text):

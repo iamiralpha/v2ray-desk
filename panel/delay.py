@@ -57,12 +57,17 @@ async def _requests(port, url, timeout):
 
 async def _cancellable(port, url, timeout, stop):
     # One cancellation budget covers both GETs, full bodies and both waits.
-    task = asyncio.create_task(asyncio.wait_for(_requests(port, url, timeout), timeout))
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    task = asyncio.create_task(_requests(port, url, timeout))
     try:
         while not task.done():
             if stop.is_set():
                 raise asyncio.CancelledError()
-            await asyncio.wait({task}, timeout=.05)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            await asyncio.wait({task}, timeout=min(.05, remaining))
         return await task
     finally:
         if not task.done():
