@@ -9,13 +9,17 @@ const num = new Intl.NumberFormat(EN ? "en-US" : "fa-IR");
 const names = new Intl.DisplayNames([EN ? "en" : "fa"], {type: "region"});
 let records = [], selected = new Set(), activeCountry = "", page = 1, running = false;
 let fetching = false, pendingDelete = null, toastTimer;
+let configsCursor = null, filterCache = null, lastSelectedId = null;
+const countryNames = new Map();
 const perPage = 50;
 const statusNames = {pending: L("تست‌نشده", "Not tested"), healthy: L("دارای پاسخ", "Responding"), failed: L("بدون پاسخ", "No response"), error: L("خطای تست", "Test error"), testing: L("در حال تست", "Testing")};
 const geminiNames = {untested:L("تست‌نشده", "Not tested"),http200:L("پاسخ 200", "HTTP 200"),blocked:L("خطای 403", "HTTP 403"),limited:L("محدودیت 429", "HTTP 429"),login:L("صفحهٔ ورود", "Sign-in page"),redirect:L("انتقال", "Redirect"),unreachable:L("خطای اتصال", "Connection error"),other:L("پاسخ دیگر", "Other response")};
 
 function countryName(code) {
   if (!code) return L("نامشخص", "Unknown");
-  try { return names.of(code) || code; } catch { return code; }
+  if (countryNames.has(code)) return countryNames.get(code);
+  let name; try { name = names.of(code) || code; } catch { name = code; }
+  countryNames.set(code, name); return name;
 }
 function flag(code) {
   return /^[A-Z]{2}$/.test(code || "") ? String.fromCodePoint(...[...code].map(c => c.charCodeAt(0) + 127397)) : "◎";
@@ -58,6 +62,7 @@ function action(fn) {
   };
 }
 function filtered() {
+  if (filterCache) return filterCache;
   const term = $("search").value.trim().toLowerCase();
   const status = $("status-filter").value;
   const gemini = $("gemini-filter").value;
@@ -66,22 +71,27 @@ function filtered() {
     && (!gemini || item.gemini_status === gemini)
     && (!term || `${item.name} ${item.host} ${item.protocol} ${countryName(item.country)}`.toLowerCase().includes(term)));
   const sort = $("sort").value, group = $("group").checked;
+  const key = sort.replace(/-desc$/, ""), direction = sort.endsWith("-desc") ? -1 : 1;
   const delay = (item) => item.status === "healthy" && item.latency_ms !== null ? item.latency_ms : null;
   list.sort((a, b) => {
-    if (group || sort === "country") {
+    if (group) {
       const country = (!a.country) - (!b.country) || countryName(a.country).localeCompare(countryName(b.country), EN ? "en" : "fa");
       if (country) return country;
     }
-    if (sort.startsWith("latency") || sort === "country") {
+    if (key === "latency") {
       const av = delay(a), bv = delay(b);
       if (av === null && bv !== null) return 1;
       if (av !== null && bv === null) return -1;
-      if (av !== null && bv !== null) return (sort === "latency-desc" ? bv - av : av - bv) || b.id - a.id;
+      return (av !== null && bv !== null ? (av - bv) * direction : 0) || a.id - b.id;
     }
-    if (sort === "name") return a.name.localeCompare(b.name, EN ? "en" : "fa") || b.id - a.id;
-    return b.id - a.id;
+    if (key === "newest") return b.id - a.id;
+    if (key === "index") return (a.id - b.id) * direction;
+    if (key === "port") return (a.port - b.port) * direction || a.id - b.id;
+    const av = key === "country" ? countryName(a.country) : String(a[key] || "");
+    const bv = key === "country" ? countryName(b.country) : String(b[key] || "");
+    return av.localeCompare(bv, EN ? "en" : "fa", {numeric:true}) * direction || a.id - b.id;
   });
-  return list;
+  filterCache = list; return list;
 }
 function scope() {
   const list = filtered();
@@ -91,6 +101,7 @@ function syncButtons() {
   const count = filtered().length;
   $("import-open").disabled = running;
   $("empty-import").disabled = running;
+  for (const input of document.querySelectorAll(".test-settings select,.test-settings input")) input.disabled = running;
   $("test-btn").disabled = running || scope().length === 0;
   $("export-btn").disabled = scope().length === 0;
   $("delete-selected").disabled = running || selected.size === 0;
@@ -101,8 +112,9 @@ function syncButtons() {
   $("selection-text").textContent = selected.size ? L(`${num.format(selected.size)} کانفیگ انتخاب شده`, `${num.format(selected.size)} configurations selected`) : L("کانفیگی انتخاب نشده", "No configurations selected");
 }
 function resetView() {
+  filterCache = null;
   page = 1;
-  selected.clear();
+  selected.clear(); lastSelectedId = null;
   render();
 }
 function renderCountries() {
@@ -153,26 +165,45 @@ function render() {
   for (const item of visible) {
     if ($("group").checked && item.country !== lastCountry) {
       const group = node("tr", undefined, "group-row"), cell = node("td");
-      cell.colSpan = 9;
+      cell.colSpan = 14;
       cell.textContent = `${flag(item.country)}  ${countryName(item.country)}`;
       group.append(cell); $("rows").append(group); lastCountry = item.country;
     }
     const tr = node("tr");
+    tr.classList.toggle("selected-row", selected.has(item.id));
+    tr.addEventListener("dblclick", action(async event => {
+      if (!running && !event.target.closest("button,input")) await openEdit(item.id);
+    }));
     const checkCell = node("td", undefined, "check-cell"), check = node("input");
     check.type = "checkbox"; check.checked = selected.has(item.id);
     check.setAttribute("aria-label", L(`انتخاب ${item.name}`, `Select ${item.name}`));
-    check.addEventListener("change", () => { check.checked ? selected.add(item.id) : selected.delete(item.id); render(); });
+    check.addEventListener("click", event => {
+      const target = check.checked;
+      const first = list.findIndex(row => row.id === lastSelectedId), last = list.findIndex(row => row.id === item.id);
+      const range = event.shiftKey && first >= 0 ? list.slice(Math.min(first,last), Math.max(first,last) + 1) : [item];
+      range.forEach(row => target ? selected.add(row.id) : selected.delete(row.id));
+      lastSelectedId = item.id; render();
+    });
     checkCell.append(check); tr.append(checkCell);
-    const identity = node("td");
-    identity.append(node("strong", item.name, "config-name"), node("small", `${item.host}:${item.port}`, "host"));
+    tr.append(node("td", num.format((page - 1) * perPage + visible.indexOf(item) + 1), "row-number"));
+    const identity = node("td", undefined, "name-cell");
+    const name = node("strong", item.name, "config-name"); name.title = item.name;
+    identity.append(name);
     tr.append(identity);
     const protocol = node("td"); protocol.append(node("span", item.protocol.toUpperCase(), "protocol")); tr.append(protocol);
+    for (const [value, className] of [[item.host,"server-address"],[item.port,"server-port"],
+      [item.transport || "—","transport"],[item.security || "—","security"]]) {
+      const cell = node("td", String(value), className); cell.title = String(value); tr.append(cell);
+    }
     const country = node("td"); country.append(node("span", `${flag(item.country)} ${countryName(item.country)}`, "country-cell")); tr.append(country);
     const latency = node("td");
     if (item.status === "healthy" && item.latency_ms !== null) {
       const delay = node("strong", `${num.format(Math.round(item.latency_ms))} ms`, "latency");
-      delay.title = L("میانهٔ زمان پاسخ‌های HTTPS موفق؛ شامل اتصال، TLS و دریافت پاسخ", "Median of successful HTTPS requests, including connection, TLS and response");
-      latency.append(delay, node("small", L(`${num.format(item.successes)} از ${num.format(item.samples)} موفق`, `${num.format(item.successes)} of ${num.format(item.samples)} successful`), "success-count"));
+      delay.title = item.delay_version === 3
+        ? `${item.delay_target} · v2rayN min · ${L("نمونه‌ها", "Samples")}: ${JSON.parse(item.delay_samples || "[]").join(", ")} ms · HTTP ${JSON.parse(item.delay_codes || "[]").join(", ")}`
+        : L("روش اندازه‌گیری قبلی؛ برای مقایسه دوباره تست کنید.", "Previous measurement method. Retest before comparing.");
+      latency.append(delay);
+      if (item.delay_version !== 3) latency.append(node("small", L("اندازه‌گیری قبلی", "Previous measurement"), "legacy-delay"));
     } else latency.append(node("span", "—", "muted"));
     tr.append(latency);
     const status = node("td");
@@ -215,26 +246,70 @@ function render() {
   $("page-info").textContent = list.length ? L(`${num.format((page - 1) * perPage + 1)} تا ${num.format(Math.min(page * perPage, list.length))} از ${num.format(list.length)} کانفیگ`, `${num.format((page - 1) * perPage + 1)}–${num.format(Math.min(page * perPage, list.length))} of ${num.format(list.length)} configurations`) : L("۰ کانفیگ", "0 configurations");
   $("page-label").textContent = `${num.format(page)} / ${num.format(pages)}`;
   $("prev-page").disabled = page === 1; $("next-page").disabled = page >= pages;
+  for (const button of document.querySelectorAll(".sort-header")) {
+    const value = $("sort").value, key = value.replace(/-desc$/, "");
+    const active = button.dataset.sort === key;
+    button.closest("th").setAttribute("aria-sort", active ? (value.endsWith("-desc") ? "descending" : "ascending") : "none");
+    button.querySelector(".sort-indicator").textContent = active ? (value.endsWith("-desc") ? "↓" : "↑") : "↕";
+  }
   syncButtons();
 }
 async function refresh() {
   if (fetching) return;
   fetching = true;
   try {
-    const data = await (await api("/api/configs")).json();
+    const data = await (await api("/api/configs" + (configsCursor ? "?cursor=" + encodeURIComponent(configsCursor) : ""))).json();
+    configsCursor = data.cursor;
     const wasRunning = running;
-    records = data.configs; running = data.job.running;
+    if (data.full) records = data.configs;
+    else if (data.configs.length) {
+      const updates = new Map(data.configs.map(row => [row.id, row]));
+      records = records.map(row => updates.get(row.id) || row);
+    }
+    running = data.job.running;
     $("job").hidden = !running;
-    $("job-text").textContent = `${data.job.cancelled ? L("در حال توقف", "Stopping") : L("در حال تست Real Delay", "Testing Real Delay")} · ${num.format(data.job.done)} ${L("از", "of")} ${num.format(data.job.total)}`;
+    const eta = data.job.eta === null ? "" : L(` · حدود ${num.format(Math.ceil(data.job.eta / 60))} دقیقه باقی‌مانده`, ` · about ${num.format(Math.ceil(data.job.eta / 60))} min left`);
+    $("job-text").textContent = `${data.job.cancelled ? L("در حال توقف", "Stopping") : L("در حال تست Real Delay", "Testing Real Delay")} · ${num.format(data.job.done)}/${num.format(data.job.total)} · ${L("هم‌زمان", "active")}: ${num.format(data.job.active)} · ${L("در صف", "queued")}: ${num.format(data.job.queued)}${eta}`;
     $("job-progress").max = Math.max(1, data.job.total); $("job-progress").value = data.job.done;
     $("cancel-test").disabled = data.job.cancelled;
     if (wasRunning && !running) toast(data.job.cancelled ? L("تست متوقف شد؛ موارد تست‌نشده تغییر نکردند.", "Testing stopped. Queued configurations were left unchanged.") : L("تست فهرست تمام شد.", "Testing complete."));
-    render();
+    if (data.full || data.configs.length || wasRunning !== running) { filterCache = null; render(); }
+    else syncButtons();
   } finally { fetching = false; }
 }
 async function startTest(ids) {
-  await api("/api/test", {ids});
+  await api("/api/test", {ids, options: readTestOptions()});
   await refresh();
+}
+function readTestOptions() {
+  return {workers:Number($("test-workers").value), samples:2,
+    timeout:Number($("test-timeout").value), target:$("test-target").value,
+    gemini:$("test-gemini").checked, country:$("test-country").checked};
+}
+const testStorageKey = "v2ray-desk-test-options-v3:" + BASE;
+try {
+  const saved = JSON.parse(localStorage.getItem(testStorageKey) || "{}");
+  for (const key of ["workers","timeout","target"]) {
+    const select = $("test-" + key);
+    if ([...select.options].some(o => o.value === String(saved[key]))) select.value = String(saved[key]);
+  }
+  for (const key of ["gemini","country"]) if (typeof saved[key] === "boolean") $("test-" + key).checked = saved[key];
+} catch {}
+document.querySelectorAll(".test-settings select,.test-settings input").forEach(input => input.addEventListener("change", () => {
+  try { localStorage.setItem(testStorageKey, JSON.stringify(readTestOptions())); } catch {}
+}));
+for (const button of document.querySelectorAll(".sort-header")) {
+  const key = button.dataset.sort;
+  for (const suffix of ["", "-desc"]) {
+    if (![...$("sort").options].some(option => option.value === key + suffix)) {
+      const option = node("option", button.childNodes[0].textContent + (suffix ? " ↓" : " ↑"));
+      option.value = key + suffix; $("sort").append(option);
+    }
+  }
+  button.addEventListener("click", () => {
+    $("sort").value = $("sort").value === key ? key + "-desc" : key;
+    filterCache = null; page = 1; render();
+  });
 }
 function openImport() {
   $("import-result").hidden = true;
