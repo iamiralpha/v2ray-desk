@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="app-base" content="{{ request.script_root }}">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>Connections · V2Ray Desk</title>
+  <link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}">
+  <link rel="icon" href="{{ url_for('static',filename='icon.svg') }}" type="image/svg+xml">
+  <script src="{{ url_for('static',filename='app.js') }}" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="{{ url_for('index') }}"><span class="brand-mark">V<span>2</span></span><span dir="ltr">V2Ray <b>Desk</b><small>Your connection workspace</small></span></a>
+    <div class="nav-title">WORKSPACE</div>
+    <button class="nav-item active" id="all-nav"><span aria-hidden="true">▦</span> My configurations <b id="nav-count">0</b></button>
+    <button class="nav-item" id="subscriptions-open"><span aria-hidden="true">↻</span> Subscriptions</button>
+    <div class="nav-title country-title">EXIT COUNTRY <span id="country-count">0</span></div>
+    <nav id="country-nav" aria-label="Filter by country"></nav>
+    <div class="sidebar-bottom mobile-visible"><div class="private-label"><span class="dot"></span> Your private panel</div><button id="password-open" class="nav-item">Change password</button><button id="logout" class="nav-item">Sign out <span aria-hidden="true">↗</span></button></div>
+  </aside>
+  <main class="workspace">
+    <header class="topbar"><span>WORKSPACE <span class="slash">/</span> <strong>Configurations</strong></span><a class="language-switch" href="{{ url_for('index', lang='fa') }}" lang="fa">فارسی</a><span class="top-badge"><span class="dot"></span> REAL DELAY</span></header>
+    <section class="page-heading">
+      <div><p class="eyebrow">YOUR CONNECTIONS, IN ORDER</p><h1>Connection desk<span class="title-dot">.</span></h1><p class="muted">Test your connections. Organize them. Keep the best.</p></div>
+      <button class="primary" id="import-open"><span aria-hidden="true">＋</span> Add configurations</button>
+    </section>
+    <section class="stats" aria-label="Configuration statistics">
+      <article><span class="stat-icon neutral">▦</span><div><p>All configurations</p><strong id="stat-total">0</strong></div><small>Saved in your workspace</small></article>
+      <article><span class="stat-icon good">↗</span><div><p>Responding</p><strong id="stat-healthy">0</strong></div><small>Successful HTTPS through the proxy</small></article>
+      <article><span class="stat-icon bad">×</span><div><p>No response</p><strong id="stat-failed">0</strong></div><small>Review or test again</small></article>
+      <article><span class="stat-icon fast">ϟ</span><div><p>Best Real Delay</p><strong id="stat-best">—</strong></div><small>Median of successful responses</small></article>
+    </section>
+    <section class="collection">
+      <div class="collection-heading"><div><h2 id="collection-title">All configurations <span id="visible-count">0</span></h2><p>Country follows the exit IP. Delay is measured from this server.</p></div><div class="actions"><button class="secondary" id="export-btn">Export links <span aria-hidden="true">↓</span></button><button class="primary" id="test-btn"><span aria-hidden="true">▷</span> Test results</button></div></div>
+      <div id="job" class="job" hidden><div><span class="pulse"></span><strong id="job-text">Testing…</strong><button id="cancel-test" class="text-button">Stop test</button></div><progress id="job-progress" max="100" value="0"></progress></div>
+      <div class="filters">
+        <label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search name, address or protocol…" aria-label="Search"></label>
+        <select id="country-filter" aria-label="Country"><option value="">All countries</option></select>
+        <select id="status-filter" aria-label="Status"><option value="">All statuses</option><option value="healthy">Responding</option><option value="failed">No response</option><option value="pending">Not tested</option><option value="testing">Testing</option><option value="error">Test error</option></select>
+        <select id="gemini-filter" aria-label="Gemini status"><option value="">Gemini: all</option><option value="http200">Gemini: HTTP 200</option><option value="blocked">Gemini: HTTP 403</option><option value="login">Gemini: sign-in</option><option value="limited">Gemini: HTTP 429</option><option value="unreachable">Gemini: connection error</option><option value="untested">Gemini: not tested</option><option value="redirect">Gemini: redirect</option><option value="other">Gemini: other responses</option></select>
+        <select id="sort" aria-label="Sort by"><option value="latency">Lowest Real Delay</option><option value="latency-desc">Highest Real Delay</option><option value="name">Configuration name</option><option value="newest">Newest first</option><option value="country">Country</option></select>
+        <label class="group-toggle"><input id="group" type="checkbox" checked> Group by country</label>
+      </div>
+      <div class="selection-bar"><span id="selection-text">No configurations selected</span><button class="text-button" id="select-filtered">Select all results</button><button class="text-button" id="clear-selection">Clear selection</button><span class="spacer"></span><button class="text-button danger" id="delete-selected">Delete selected</button><button class="text-button danger" id="delete-failed">Delete nonresponding</button></div>
+      <div class="table-scroll">
+        <table><thead><tr><th class="check-cell"><input type="checkbox" id="select-page" aria-label="Select this page"></th><th>Name & server address</th><th>Protocol</th><th>EXIT COUNTRY</th><th>Real Delay <span aria-hidden="true">↓</span></th><th>Status</th><th title="HTTP 200 indicates web access only.">Gemini / HTTP</th><th>Last tested</th><th class="operations">Actions</th></tr></thead><tbody id="rows"></tbody></table>
+      </div>
+      <div id="empty" class="empty"><div class="empty-symbol">＋</div><h3>Add your first connection</h3><p>Paste your links or import a text file.<br>Then find the best connections with Real Delay.</p><button class="secondary" id="empty-import">Add configurations</button></div>
+      <footer class="table-footer"><span id="page-info">0 configurations</span><div><button class="icon-button" id="prev-page" aria-label="Previous page">→</button><span id="page-label">1 / 1</span><button class="icon-button" id="next-page" aria-label="Next page">←</button></div></footer>
+    </section>
+    <p class="footnote"><span class="dot"></span> Real Delay: three HTTPS requests through Xray. Gemini tests web access; HTTP 200 does not guarantee account access. <span>V2Ray Desk · 1.0</span></p>
+  </main>
+  <dialog id="import-dialog"><form id="import-form"><div class="dialog-heading"><h2>Add configurations</h2><button type="button" class="icon-button close-dialog" aria-label="Close">×</button></div><p class="muted">One link per line. Base64 subscription text is also accepted.</p><label for="import-text">VLESS, VMess, Trojan or Shadowsocks links</label><textarea id="import-text" dir="ltr" rows="9" placeholder="vless://…&#10;vmess://…&#10;trojan://…" required spellcheck="false"></textarea><label class="file-label" for="import-file">Or choose a text file <input id="import-file" type="file" accept=".txt,.conf,.list,text/plain"></label><p class="hint">Up to 2,000 links per import. Duplicate configurations are skipped.</p><div id="import-result" class="import-result" role="status" hidden></div><div class="dialog-footer"><button type="button" class="secondary close-dialog">Close</button><button type="submit" class="primary" id="import-submit">Save configurations</button></div></form></dialog>
+  <dialog id="edit-dialog"><form id="edit-form"><div class="dialog-heading"><h2>Edit configuration</h2><button type="button" class="icon-button close-dialog" aria-label="Close">×</button></div><input id="edit-id" type="hidden"><label for="edit-name">Display name</label><input id="edit-name" maxlength="200"><label for="edit-uri">Full configuration link</label><textarea id="edit-uri" dir="ltr" rows="7" required spellcheck="false"></textarea><p class="hint">Saving clears the previous test results.</p><div class="dialog-footer"><button type="button" class="secondary close-dialog">Cancel</button><button type="submit" class="primary">Save changes</button></div></form></dialog>
+  <dialog id="password-dialog"><form id="password-form"><div class="dialog-heading"><h2>Change password</h2><button type="button" class="icon-button close-dialog" aria-label="Close">×</button></div><label for="current-password">Current password</label><input type="password" id="current-password" autocomplete="current-password" required><label for="new-password">New password (at least 12 characters)</label><input type="password" id="new-password" autocomplete="new-password" minlength="12" maxlength="128" required><label for="confirm-password">Confirm new password</label><input type="password" id="confirm-password" autocomplete="new-password" minlength="12" maxlength="128" required><div class="dialog-footer"><button class="primary" type="submit">Save and sign in again</button></div></form></dialog>
+  <dialog id="confirm-dialog"><div class="dialog-heading"><h2>Delete configurations</h2></div><p id="confirm-message"></p><p class="hint">This cannot be undone. Export your links first if you need a backup.</p><div class="dialog-footer"><button id="confirm-no" class="secondary">Cancel</button><button id="confirm-yes" class="danger-button">Delete configurations</button></div></dialog>
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ورود · V2Ray Desk</title>
+  <link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}">
+  <link rel="icon" href="{{ url_for('static',filename='icon.svg') }}" type="image/svg+xml">
+</head>
+<body class="login-page">
+  <main class="login-card">
+    <div class="brand-mark">V<span>2</span></div>
+    <a class="language-switch" href="{{ url_for('login', lang='en') }}" lang="en">English</a><p class="eyebrow">V2RAY DESK / PRIVATE PANEL</p>
+    <h1>همهٔ اتصال‌ها،<br>یک میز کار.</h1>
+    <p class="muted">برای مدیریت کانفیگ‌ها وارد پنل شخصی خود شوید.</p>
+    <form method="post" action="{{ url_for('login') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label for="password">رمز عبور</label>
+      <input id="password" type="password" name="password" autocomplete="current-password" required autofocus maxlength="128">
+      {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+      <button class="primary full" type="submit">ورود به پنل <span aria-hidden="true">←</span></button>
+    </form>
+    <div class="login-note"><span class="dot"></span> مدیریت خصوصی · تست واقعی اتصال</div>
+  </main>
+  <div class="login-art" aria-hidden="true"><div class="orbit one"></div><div class="orbit two"></div><div class="orbit three"></div><span>اتصال خوب،<br>با حدس پیدا نمی‌شود.</span><small>MEASURE. ORGANIZE. CONNECT.</small></div>
+</body>
+</html>
