@@ -41,8 +41,14 @@ def test_engine_accepts_generated_config(tmp_path, protocol, transport):
 @pytest.fixture
 def real_proxy(tmp_path, monkeypatch):
     class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
         def do_GET(self):
-            if self.path == "/gemini":
+            if self.path == "/delay":
+                time.sleep(.08)
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif self.path == "/gemini":
                 self.send_response(403)
                 self.send_header("Content-Length", "9")
                 self.end_headers()
@@ -78,6 +84,7 @@ def real_proxy(tmp_path, monkeypatch):
                 time.sleep(.05)
         monkeypatch.setattr(tester, "public_address", lambda *args: "127.0.0.1")
         monkeypatch.setattr(tester, "TRACE_URL", f"http://127.0.0.1:{http.server_port}/trace")
+        monkeypatch.setitem(tester.DELAY_TARGETS, "google", f"http://127.0.0.1:{http.server_port}/delay")
         monkeypatch.setattr(tester, "GEMINI_URL", f"http://127.0.0.1:{http.server_port}/gemini")
         auth = base64.b64encode(b"aes-256-gcm:test-password").decode()
         yield f"ss://{auth}@127.0.0.1:{proxy_port}#integration"
@@ -89,16 +96,72 @@ def real_proxy(tmp_path, monkeypatch):
 
 
 def test_real_proxy_roundtrip_and_gemini_403(real_proxy):
-    outcome = tester.probe(real_proxy, XRAY, threading.Event(), timeout=2, samples=3)
+    outcome = tester.probe(real_proxy, XRAY, threading.Event(), timeout=2, samples=2)
     assert outcome["status"] == "healthy"
-    assert outcome["latency_ms"] > 0
-    assert outcome["successes"] == 3 and outcome["country"] == "DE"
+    assert outcome["latency_ms"] >= 70
+    assert len(json.loads(outcome["delay_samples"])) == 2
+    assert outcome["delay_version"] == 3 and outcome["delay_target"] == "google"
+    assert outcome["successes"] == 2 and outcome["country"] == "DE"
     assert outcome["gemini_status"] == "blocked" and outcome["gemini_code"] == 403
 
 
 def test_open_tcp_port_with_wrong_credentials_is_not_healthy(real_proxy):
     wrong = base64.b64encode(b"aes-256-gcm:wrong-password").decode()
     original = real_proxy.split("@", 1)[1]
-    outcome = tester.probe("ss://" + wrong + "@" + original, XRAY, threading.Event(), timeout=1, samples=1)
+    outcome = tester.probe("ss://" + wrong + "@" + original, XRAY, threading.Event(), timeout=1, samples=2)
     assert outcome["status"] == "failed"
     assert outcome["gemini_status"] == "unreachable"
+
+
+def test_bulk_shared_core_keeps_nodes_isolated(real_proxy, tmp_path, monkeypatch):
+    from panel.store import initialize, connect
+    wrong = base64.b64encode(b"aes-256-gcm:wrong-password").decode()
+    bad_uri = "ss://" + wrong + "@" + real_proxy.split("@", 1)[1]
+    db_path = initialize(tmp_path / "bulk")
+    with connect(db_path) as db:
+        for uri in (real_proxy, bad_uri):
+            parsed = parse_uri(uri)
+            db.execute("INSERT INTO configs(uri,name,protocol,host,port,fingerprint) VALUES(?,?,?,?,?,?)",
+                       [parsed[key] for key in ("uri", "name", "protocol", "host", "port", "fingerprint")])
+    original = subprocess.Popen
+    cores = []
+    def tracked(args, **kwargs):
+        process = original(args, **kwargs)
+        if "run" in args and "-test" not in args:
+            cores.append(process)
+        return process
+    monkeypatch.setattr(subprocess, "Popen", tracked)
+    manager = tester.TestManager(db_path, XRAY)
+    manager.start([1, 2], {"workers": 2, "timeout": 2, "country": False, "gemini": False})
+    deadline = time.monotonic() + 10
+    while manager.snapshot()["running"] and time.monotonic() < deadline:
+        time.sleep(.05)
+    assert not manager.snapshot()["running"] and manager.snapshot()["done"] == 2
+    with connect(db_path) as db:
+        rows = db.execute("SELECT status,latency_ms FROM configs ORDER BY id").fetchall()
+    assert rows[0]["status"] == "healthy"
+    assert rows[1]["status"] == "failed" and rows[1]["latency_ms"] is None
+    assert len(cores) == 1 and cores[0].poll() is not None
+
+
+def test_invalid_engine_settings_do_not_fail_valid_neighbor(real_proxy, tmp_path):
+    from panel.store import initialize, connect
+    bad = f"vless://{UUID}@example.com:443?encryption=invalid-secret-value"
+    db_path = initialize(tmp_path / "invalid-batch")
+    with connect(db_path) as db:
+        for uri in (real_proxy, bad):
+            parsed = parse_uri(uri)
+            db.execute("INSERT INTO configs(uri,name,protocol,host,port,fingerprint) VALUES(?,?,?,?,?,?)",
+                       [parsed[k] for k in ("uri", "name", "protocol", "host", "port", "fingerprint")])
+    manager = tester.TestManager(db_path, XRAY)
+    assert manager.engine["available"] and manager.engine["version"]
+    manager.start([1, 2], {"workers": 2, "timeout": 2, "country": False, "gemini": False})
+    deadline = time.monotonic() + 15
+    while manager.snapshot()["running"] and time.monotonic() < deadline:
+        time.sleep(.05)
+    assert not manager.snapshot()["running"] and manager.snapshot()["done"] == 2
+    with connect(db_path) as db:
+        rows = db.execute("SELECT status,error FROM configs ORDER BY id").fetchall()
+    assert rows[0]["status"] == "healthy"
+    assert rows[1]["status"] == "invalid" and "encryption" in rows[1]["error"]
+    assert "invalid-secret-value" not in rows[1]["error"] and UUID not in rows[1]["error"]

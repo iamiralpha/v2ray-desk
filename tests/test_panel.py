@@ -80,8 +80,44 @@ def test_shadowsocks_and_reality():
     auth = base64.urlsafe_b64encode(b"aes-256-gcm:password").decode().rstrip("=")
     ss = parse_uri(f"ss://{auth}@example.com:8388#name")
     assert ss["outbound"]["settings"]["servers"][0]["password"] == "password"
-    reality = parse_uri(f"vless://{UUID}@example.com:443?security=reality&pbk=test&sid=ab&type=tcp&flow=xtls-rprx-vision")
-    assert reality["outbound"]["streamSettings"]["realitySettings"]["publicKey"] == "test"
+    key = base64.urlsafe_b64encode(b"a" * 32).decode().rstrip("=")
+    reality = parse_uri(f"vless://{UUID}@example.com:443?security=reality&pbk={key}&sid=ab&type=tcp&flow=xtls-rprx-vision")
+    assert reality["outbound"]["streamSettings"]["realitySettings"]["publicKey"] == key
+
+
+@pytest.mark.parametrize("query,reason", [
+    ("security=reality&pbk=bad", "32-byte"),
+    ("security=reality&pbk=" + "A" * 43 + "&sid=abc", "even-length"),
+    ("security=tls&type=ws&flow=xtls-rprx-vision", "Vision"),
+    ("security=none&type=tcp&flow=xtls-rprx-vision", "Vision"),
+])
+def test_reject_invalid_security_settings(query, reason):
+    with pytest.raises(ConfigError, match=reason):
+        parse_uri(f"vless://{UUID}@example.com:443?{query}")
+
+
+def test_reject_invalid_ss2022_key():
+    auth = base64.b64encode(b"2022-blake3-aes-128-gcm:not-a-valid-key").decode()
+    with pytest.raises(ConfigError, match="Base64 keys"):
+        parse_uri(f"ss://{auth}@example.com:443")
+
+
+def test_csv_report_order_no_credentials_and_formula_protection(client):
+    import csv
+    import io
+    add(client, LINK + "\n" + LINK.replace("example.com", "example.net"))
+    with connect(client.application.config["DB_PATH"]) as db:
+        db.execute("UPDATE configs SET name=?,country='DE',gemini_code=403 WHERE id=1",
+                   (' \t=HYPERLINK("https://example.com","click")',))
+    report = send(client, "/api/report", {"ids": [1, 2]})
+    assert report.status_code == 200 and report.mimetype == "text/csv"
+    data = list(csv.DictReader(io.StringIO(report.data.decode("utf-8-sig"))))
+    assert [r["id"] for r in data] == ["1", "2"]
+    assert data[0]["name"].startswith("'") and data[0]["gemini_code"] == "403"
+    assert data[0]["country"] == "DE"
+    assert UUID not in report.text and "vless://" not in report.text
+    assert send(client, "/api/report", {"ids": []}).status_code == 400
+    assert client.post("/api/report", json={"ids": [1]}).status_code == 403
 
 
 def test_auth_and_csrf(client):
@@ -213,7 +249,7 @@ def test_background_job_persists_result(client, monkeypatch):
     add(client)
     manager = client.application.extensions["tester"]
     monkeypatch.setattr("panel.tester.shutil.which", lambda value: "/xray")
-    manager.probe_function = lambda *a: result("healthy", latency_ms=123, country="DE", successes=3,
+    manager.probe_function = lambda *a, **k: result("healthy", latency_ms=123, country="DE", successes=3,
                                              samples=3, gemini_status="blocked", gemini_code=403)
     row_id = client.get("/api/configs").json["configs"][0]["id"]
     assert send(client, "/api/test", {"ids": [row_id]}).status_code == 202
