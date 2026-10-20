@@ -75,6 +75,7 @@ fi
 chown -R root:root "$APP"
 chmod -R a+rX,go-w "$APP"
 python3 -m venv "$APP/venv"
+"$APP/venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip==26.2.2
 "$APP/venv/bin/pip" install --disable-pip-version-check -r "$APP/requirements.txt"
 chmod -R a+rX,go-w "$APP/venv"
 if [[ "${PANEL_XRAY_PREINSTALLED:-0}" != "1" ]]; then

@@ -9,7 +9,7 @@ A self-hosted configuration manager for Ubuntu with public browsing, password-pr
 - Password-protected dashboard, secure sessions, CSRF protection and login rate limiting.
 - Bulk import of VLESS, VMess, Trojan and Shadowsocks links from text or files, including Base64 subscription text.
 - Subscription URL management: add, edit, refresh individually or together, and delete with optional removal of source-only configurations.
-- Public, read-only results with country/protocol filters, Real Delay, Gemini status and one-click configuration copying; management requires sign-in.
+- Public, read-only results with country/protocol filters, Real Delay, Gemini status and individual or selected-configuration copying; management requires sign-in.
 - A built-in catalog of 27 verified subscription URLs, daily refresh/testing, and optional deletion after two consecutive real connection failures.
 - v2rayN-style Real Delay: two GETs over a reusable connection, minimum latency and 1–128 parallel workers with a shared Xray core.
 - Exit-country detection, selectable country filtering, grouping, search and delay sorting.
@@ -102,6 +102,8 @@ Older saved results are marked **Previous measurement** until retested.
 
 Choose 1–128 parallel tests (default 8), including 64, 100 and 128 in the web panel. Bulk tests share one Xray process per bounded batch,
 with a separate loopback SOCKS port and a dedicated outbound route for every configuration.
+Invalid configurations are isolated by validation alone; all valid survivors rejoin one shared
+core and worker pool, so a bad configuration does not reduce subsequent network tests to tiny groups.
 Only the selected number of workers are active; the queue supports 10,000 stored configurations.
 The UI fetches changed rows and renders 50 rows per page. Stop leaves queued rows unchanged
 and promptly cancels in-flight Real Delay, country and Gemini HTTP requests. DNS resolution
@@ -150,6 +152,8 @@ Configuration links contain credentials and are stored unencrypted in the privat
 The public homepage intentionally shares every saved configuration and its full link with visitors
 who have the panel address. Subscription URLs, administrative settings and mutation endpoints
 remain password protected. This installation is intended to share its configuration collection.
+Visitors can select rows across pages and copy their links together. Changing search or filters
+clears the selection with a notice. Bulk reads are bounded to 500 IDs per request.
 On Linux/POSIX, initialization enforces `0700` on the data directory and `0600` on the
 SQLite database and its journal, WAL and shared-memory files, including existing files.
 Back up the complete data directory with the service stopped, or use SQLite's online backup API.
