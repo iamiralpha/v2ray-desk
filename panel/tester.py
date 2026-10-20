@@ -30,11 +30,17 @@ DELAY_TARGETS = {
     "google": "https://www.google.com/generate_204",
     "gstatic": "https://www.gstatic.com/generate_204",
 }
+MAX_WORKERS = 128
+MAX_BATCH_SIZE = 128
 DEFAULT_OPTIONS = {"workers": 8, "timeout": 5, "samples": 2, "target": "google",
-                   "gemini": True, "country": True}
+                   "gemini": True, "country": True, "auto_delete_failed": False}
 
 
 class InvalidConfigError(ConfigError):
+    pass
+
+
+class CoreStoppedError(ConfigError):
     pass
 
 
@@ -78,12 +84,12 @@ def test_options(options=None):
     if not isinstance(supplied, dict) or set(supplied) - set(DEFAULT_OPTIONS):
         raise ConfigError("Invalid test options.")
     values = {**DEFAULT_OPTIONS, **supplied}
-    for key, lower, upper in [("workers", 1, 32), ("timeout", 2, 20), ("samples", 1, 3)]:
+    for key, lower, upper in [("workers", 1, MAX_WORKERS), ("timeout", 2, 20), ("samples", 1, 3)]:
         if type(values[key]) is not int or not lower <= values[key] <= upper:
             raise ConfigError("Invalid test options.")
     if values["samples"] != 2 or not isinstance(values["target"], str) or values["target"] not in DELAY_TARGETS:
         raise ConfigError("Invalid test options.")
-    if any(type(values[k]) is not bool for k in ("gemini", "country")):
+    if any(type(values[k]) is not bool for k in ("gemini", "country", "auto_delete_failed")):
         raise ConfigError("Invalid test options.")
     return values
 
@@ -210,6 +216,8 @@ def shared_core(prepared, executable, stop):
             if process.poll() is not None:
                 raise ConfigError("The batch test core could not start.")
             yield {item["id"]: item["port"] for item in prepared}
+            if not stop.is_set() and process.poll() is not None:
+                raise CoreStoppedError("The batch test core stopped before the batch completed.")
         finally:
             for sock in reservations:
                 sock.close()
@@ -231,10 +239,12 @@ def result(status, error=None, **values):
 
 def probe_connection(port, stop, timeout=5, samples=2, target="google", gemini=True, country=True):
     latencies, codes, latency = [], [], None
+    connection_failure = False
     try:
         latency, latencies, codes = measure_delay(port, DELAY_TARGETS[target], timeout, stop)
-    except Exception:
-        pass
+    except Exception as exc:
+        connection_failure = getattr(exc, "real_delay_connection_failure", False) is True
+        codes = getattr(exc, "delay_response_codes", [])
     if stop.is_set():
         return result("error", "تست متوقف شد.")
     country_code, exit_ip = lookup_country(port, timeout, stop) if country and latency else (None, None)
@@ -246,7 +256,9 @@ def probe_connection(port, stop, timeout=5, samples=2, target="google", gemini=T
     metadata = {"gemini_status": gemini_status, "gemini_code": gemini_code,
                 "delay_target": target, "delay_samples": json.dumps(latencies), "delay_codes": json.dumps(codes)}
     if latency is None:
-        return result("failed", "The two-request delay test failed or timed out.", samples=2, **metadata)
+        return result("failed", "The two-request delay test failed or timed out.", samples=2,
+                      real_delay_connection_failure=connection_failure,
+                      real_delay_response_received=bool(codes), **metadata)
     return result("healthy", latency_ms=latency, country=country_code, exit_ip=exit_ip,
                   successes=2, samples=2, **metadata)
 
@@ -313,7 +325,9 @@ class TestManager:
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.state = {"running": False, "total": 0, "done": 0, "active": 0, "cancelled": False,
-                      "workers": workers, "options": {**DEFAULT_OPTIONS, "workers": workers}}
+                      "workers": workers, "options": {**DEFAULT_OPTIONS, "workers": workers}, "auto_deleted": 0}
+        self._outcomes = {}
+        self._job_unsafe = False
         self.started = None
         self.ended = None
         self.epoch = uuid.uuid4().hex
@@ -371,13 +385,23 @@ class TestManager:
             if not rows:
                 raise ValueError("کانفیگی برای تست انتخاب نشده است.")
             self.stop.clear()
+            self._outcomes = {}
+            self._job_unsafe = False
             self.started, self.ended = time.monotonic(), None
             self.state = {"running": True, "total": len(rows), "done": 0, "active": 0, "cancelled": False,
-                          "workers": min(options["workers"], len(rows)), "options": options}
-            threading.Thread(target=self._run, args=(rows, options), daemon=True).start()
+                          "workers": min(options["workers"], len(rows)), "options": options, "auto_deleted": 0}
+            try:
+                threading.Thread(target=self._run, args=(rows, options), daemon=True).start()
+            except Exception:
+                # No worker exists to run _run's cleanup if thread creation fails.
+                self.state.update(running=False, phase="idle")
+                self.ended = time.monotonic()
+                raise
 
     def cancel(self):
         with self.lock:
+            if not self.state["running"]:
+                return
             self.stop.set()
             self.state["cancelled"] = True
 
@@ -388,7 +412,7 @@ class TestManager:
             with connect(self.db_path) as db:
                 db.execute("UPDATE configs SET status='testing' WHERE id=?", (row["id"],))
             self.changed(row["id"])
-            arguments = {k: v for k, v in options.items() if k != "workers"}
+            arguments = {k: v for k, v in options.items() if k not in {"workers", "auto_delete_failed"}}
             if ports is None:
                 outcome = self.probe_function(row["uri"], self.executable, self.stop, **arguments)
             else:
@@ -404,8 +428,36 @@ class TestManager:
             db.execute("UPDATE configs SET " + ",".join(key + "=?" for key in keys) + " WHERE id=?",
                        [outcome[key] for key in keys] + [row["id"]])
         with self.lock:
-            self.state["done"] += 1
+            if row["id"] not in self._outcomes:
+                self.state["done"] += 1
+            self._outcomes[row["id"]] = (
+                "healthy" if outcome["status"] == "healthy" or outcome.get("real_delay_response_received") is True else
+                "failed" if outcome["status"] == "failed" and outcome.get("real_delay_connection_failure") is True else None
+            )
             self.changed(row["id"])
+
+    def _finish_failure_streaks(self, options):
+        """Apply one outcome per configuration only after an uncancelled job."""
+        healthy = [(config_id,) for config_id, outcome in self._outcomes.items() if outcome == "healthy"]
+        failed = [(config_id,) for config_id, outcome in self._outcomes.items() if outcome == "failed"]
+        deleted = 0
+        with connect(self.db_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany("UPDATE configs SET real_failure_streak=0 WHERE id=?", healthy)
+            db.executemany("UPDATE configs SET real_failure_streak=real_failure_streak+1 WHERE id=?", failed)
+            if options["auto_delete_failed"]:
+                # Keep each IN query bounded, including a 10,000-row job.
+                for offset in range(0, len(failed), MAX_BATCH_SIZE):
+                    ids = [item[0] for item in failed[offset:offset + MAX_BATCH_SIZE]]
+                    rows = db.execute("SELECT id,fingerprint FROM configs WHERE real_failure_streak>=2 AND id IN ("
+                                      + ",".join("?" for _ in ids) + ")", ids).fetchall()
+                    db.executemany("INSERT OR IGNORE INTO rejected_configs(fingerprint) VALUES (?)",
+                                   [(row["fingerprint"],) for row in rows])
+                    db.executemany("DELETE FROM configs WHERE id=?", [(row["id"],) for row in rows])
+                    deleted += len(rows)
+        self.state["auto_deleted"] = deleted
+        if deleted:
+            self.invalidate()
 
     def _drain(self, rows, options, ports=None):
         # Only worker-count futures exist, even with 10,000 configurations.
@@ -435,7 +487,14 @@ class TestManager:
                 with self.lock:
                     self.state["phase"] = "testing"
                 self._drain(prepared, options, ports)
+        except CoreStoppedError:
+            self._job_unsafe = True
+            for row in prepared:
+                if self._outcomes.get(row["id"]) == "failed":
+                    self._save(row, result("error", "The batch test core stopped before the batch completed."))
         except (ConfigError, OSError, subprocess.TimeoutExpired) as exc:
+            if not isinstance(exc, InvalidConfigError):
+                self._job_unsafe = True
             # Isolate invalid engine settings rather than failing every node.
             if len(prepared) > 1:
                 middle = len(prepared) // 2
@@ -446,11 +505,13 @@ class TestManager:
                            else result("error", "The batch test core could not start."))
 
     def _run(self, rows, options):
+        completed = False
         try:
             if self.probe_function is not probe:
                 self._drain(rows, options)
+                completed = True
                 return
-            batch_size = min(128, options["workers"] * 4)
+            batch_size = min(MAX_BATCH_SIZE, options["workers"] * 4)
             for offset in range(0, len(rows), batch_size):
                 if self.stop.is_set():
                     break
@@ -472,8 +533,13 @@ class TestManager:
                 with ThreadPoolExecutor(max_workers=options["workers"]) as pool:
                     prepared = [item for item in pool.map(prepare, rows[offset:offset + batch_size]) if item]
                 self._batch(prepared, options)
+            completed = True
         finally:
             with self.lock:
-                self.state["running"] = False
-                self.state["phase"] = "idle"
-                self.ended = time.monotonic()
+                try:
+                    if completed and not self.stop.is_set() and not self._job_unsafe and self.state["done"] == self.state["total"]:
+                        self._finish_failure_streaks(options)
+                finally:
+                    self.state["running"] = False
+                    self.state["phase"] = "idle"
+                    self.ended = time.monotonic()

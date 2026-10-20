@@ -59,10 +59,16 @@ def initialize(data_dir):
             config_id INTEGER NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
             PRIMARY KEY(subscription_id,config_id)
         );
+        CREATE TABLE IF NOT EXISTS rejected_configs (
+            fingerprint TEXT PRIMARY KEY,
+            rejected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        );
         """)
         db.execute("INSERT OR IGNORE INTO settings VALUES ('secret',?)", (secrets.token_hex(32),))
         db.execute("INSERT OR IGNORE INTO settings VALUES ('auth_version','1')")
         columns = {row["name"] for row in db.execute("PRAGMA table_info(configs)")}
+        if "real_failure_streak" not in columns:
+            db.execute("ALTER TABLE configs ADD COLUMN real_failure_streak INTEGER NOT NULL DEFAULT 0")
         if "delay_codes" not in columns:
             db.execute("ALTER TABLE configs ADD COLUMN delay_codes TEXT NOT NULL DEFAULT '[]'")
         if "transport" not in columns:

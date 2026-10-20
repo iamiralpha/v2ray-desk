@@ -90,8 +90,11 @@ def reconcile(db, subscription_id, text):
     previous = {r[0] for r in db.execute(
         "SELECT config_id FROM subscription_configs WHERE subscription_id=?", (subscription_id,))}
     current, added = set(), 0
+    rejected = {row[0] for row in db.execute("SELECT fingerprint FROM rejected_configs")}
     count = db.execute("SELECT COUNT(*) FROM configs").fetchone()[0]
     for fingerprint, item in parsed.items():
+        if fingerprint in rejected:
+            continue
         row = db.execute("SELECT id FROM configs WHERE fingerprint=?", (fingerprint,)).fetchone()
         if row:
             config_id = row[0]
