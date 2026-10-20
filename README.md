@@ -9,7 +9,7 @@ A private, self-hosted configuration manager for Ubuntu with complete English an
 - Password-protected dashboard, secure sessions, CSRF protection and login rate limiting.
 - Bulk import of VLESS, VMess, Trojan and Shadowsocks links from text or files, including Base64 subscription text.
 - Subscription URL management: add, edit, refresh individually or together, and delete with optional removal of source-only configurations.
-- Real Delay through an isolated Xray process: three HTTPS requests, median successful latency and success count.
+- v2rayN-style Real Delay: two GETs over a reusable connection, minimum latency and 1–32 parallel workers with a shared Xray core.
 - Exit-country detection, selectable country filtering, grouping, search and delay sorting.
 - Gemini HTTP check through the same proxy: 200, 403, 429, sign-in redirect and connection failures.
 - Edit, copy, export and delete configurations, including nonresponding configurations in the current filter.
@@ -81,16 +81,33 @@ The random path supplements password authentication.
 
 ## What the tests mean
 
-Real Delay is the elapsed time of a complete HTTPS request to
-`https://www.cloudflare.com/cdn-cgi/trace` through the selected proxy, including connection
-setup, proxy negotiation, TLS and response transfer. It is neither ICMP ping nor a TCP port check.
-Xray startup time is excluded. Three independent requests are made and the median of successful
-ones is displayed alongside the success count.
+Real Delay follows the measurement algorithm in
+[v2rayN ConnectionHandler](https://github.com/2dust/v2rayN/blob/57f17d5939e88c8e643ab49b90869d637765e75a/v2rayN/ServiceLib/Handler/ConnectionHandler.cs#L69):
+two complete GET requests using one reusable HTTP client through the selected proxy,
+with a 100 ms wait after each request. The lowest positive integer duration is displayed.
+The default target is `https://www.google.com/generate_204`; Gstatic and Cloudflare 204
+endpoints are also available. The default five-second deadline covers both requests and
+waits. A failed or timed-out pair is unsuccessful. Hover over a delay to see both timings
+and HTTP codes. As in v2rayN, any completed HTTP response can be timed, including 403;
+this is a latency measurement, not proof that a particular service is accessible.
+Requests follow at most ten redirects and response bodies are limited to 1 MB.
 
-The measurement runs from your Ubuntu server. Performance from your phone or home connection can differ.
-The country comes from the actual exit IP reported by Cloudflare, not from the configuration's name.
-Untested or nonresponding configurations have an unknown country. A failure to reach Cloudflare
-may be target-specific, so retest before deleting valuable configurations.
+Single and bulk tests use the same timer. Xray startup, country lookup and Gemini checks
+are excluded from the delay. The measurement runs from the Ubuntu server; its route, load,
+HTTP runtime and network differ from v2rayN on a phone or PC, so values need not match.
+Older saved results are marked **Previous measurement** until retested.
+
+Choose 1–32 parallel tests (default 8). Bulk tests share one Xray process per bounded batch,
+with a separate loopback SOCKS port and a dedicated outbound route for every configuration.
+Only the selected number of workers are active; the queue supports 10,000 stored configurations.
+The UI fetches changed rows and renders 50 rows per page. Stop leaves queued rows unchanged;
+in-flight Real Delay requests are cancelled promptly, while an ongoing country/Gemini request
+may need its configured timeout. Use 1–4 workers when comparing latency, since excess
+concurrency can increase host load and contention.
+
+Country is looked up separately from the exit IP reported by Cloudflare, never inferred from
+the configuration's name. A missing country does not invalidate a successful delay test.
+Failures can be target-specific, so retest before deleting valuable configurations.
 
 Gemini is checked separately at `https://gemini.google.com/app` through the same Xray proxy.
 HTTP 403 is reported exactly; it does not determine whether the cause is geography, bot detection
@@ -106,8 +123,8 @@ With country grouping enabled, delay sorting is applied within each group; disab
 
 - VLESS and VMess with standard UUIDs; Trojan; AEAD and 2022 Shadowsocks.
 - TCP, WebSocket, gRPC, HTTPUpgrade and basic XHTTP, with TLS or REALITY where compatible.
-- Plain link lists and Base64 subscription content; automatic fetching of subscription URLs is not included.
-- Up to 2,000 links per import, 10,000 stored configurations, 4 MB request bodies and three concurrent tests.
+- Plain link lists, Base64 content and managed subscription URLs with manual refresh.
+- Up to 2,000 links per import, 10,000 stored configurations, 4 MB request bodies and 1–32 concurrent tests.
 - Unsupported: arbitrary Xray JSON, Shadowsocks plugins, KCP/QUIC, custom XHTTP `extra`,
   legacy VMess with nonzero alterId, and disabled TLS certificate verification.
 - Local, private and reserved server addresses are rejected. The resolved public address is pinned during a test.
@@ -173,3 +190,12 @@ its unedited, source-only configurations. Deleted configurations may return on t
 if the source still contains them. Subscription URLs may contain secrets and stay in the private
 database; they are shown only in the authenticated edit form. Public HTTP/HTTPS destinations
 only: private/local addresses, insecure TLS, and HTTPS-to-HTTP redirects are rejected.
+
+## Results table
+
+The fluid workspace uses the available display width. A compact, v2rayN-inspired table
+separates name, protocol, address, port, transport, TLS, country, delay, status and Gemini result.
+Click a column header to sort in either direction; unmeasured delays stay at the bottom.
+Country grouping is optional. Shift-click checkboxes to select a range; double-click a row
+to edit. Table headers stay visible while scrolling, and smaller displays scroll inside the
+table instead of widening the entire page. All controls are available in English and Persian.
