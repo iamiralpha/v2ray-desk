@@ -101,10 +101,10 @@ Older saved results are marked **Previous measurement** until retested.
 Choose 1–32 parallel tests (default 8). Bulk tests share one Xray process per bounded batch,
 with a separate loopback SOCKS port and a dedicated outbound route for every configuration.
 Only the selected number of workers are active; the queue supports 10,000 stored configurations.
-The UI fetches changed rows and renders 50 rows per page. Stop leaves queued rows unchanged;
-in-flight Real Delay requests are cancelled promptly, while an ongoing country/Gemini request
-may need its configured timeout. Use 1–4 workers when comparing latency, since excess
-concurrency can increase host load and contention.
+The UI fetches changed rows and renders 50 rows per page. Stop leaves queued rows unchanged
+and promptly cancels in-flight Real Delay, country and Gemini HTTP requests. DNS resolution
+or Xray startup/validation may still need to finish before the batch ends. Use 1–4 workers
+when comparing latency, since excess concurrency can increase host load and contention.
 
 Country is looked up separately from the exit IP reported by Cloudflare, never inferred from
 the configuration's name. A missing country does not invalidate a successful delay test.
@@ -145,6 +145,8 @@ Panel address settings: `/etc/v2ray-desk/config.json`
 Nginx site: `/etc/nginx/conf.d/v2ray-desk.conf`
 
 Configuration links contain credentials and are stored unencrypted in the private data directory.
+On Linux/POSIX, initialization enforces `0700` on the data directory and `0600` on the
+SQLite database and its journal, WAL and shared-memory files, including existing files.
 Back up the complete data directory with the service stopped, or use SQLite's online backup API.
 Do not copy live SQLite files without their WAL state. Keep backups private.
 Run one web process: the test queue is held in memory. Restarted tests become explicit errors and can be retried.
@@ -166,10 +168,14 @@ PANEL_COOKIE_SECURE=0 python manage.py serve
 ```bash
 python tools/install_xray.py --destination /tmp/v2ray-desk-xray
 XRAY_TEST_BIN=/tmp/v2ray-desk-xray python -m pytest -q
+node --test tests/test_frontend.js
 ```
 
+The UI regression tests use Node.js 24 in CI and require no npm packages.
 Tests cover URI parsing, authentication, CSRF, English diagnostics, path-aware URLs,
 safe bulk deletion, password invalidation, port validation and actual Xray proxy roundtrips.
+They also cover slow-response deadlines, cancellation, compressed-body limits, private file
+permissions on POSIX, country-filter resets and subscription controls during pending requests.
 Integration fixtures use synthetic local HTTP endpoints to deterministically check 403 and wrong-password behavior;
 production probes use HTTPS.
 
@@ -182,6 +188,8 @@ Xray is downloaded separately from its [official release](https://github.com/XTL
 
 Open **Subscriptions**, enter a name and an HTTP/HTTPS URL, then choose **Add & sync**.
 Plain-text and Base64 lists are accepted (4 MB and 2,000 links per subscription, up to 100 subscriptions).
+Each download has a 45-second total deadline covering DNS, redirects, response headers and body.
+The size limit applies to both transferred and decompressed data.
 Refresh can be run individually or for all enabled subscriptions; there is no scheduled polling.
 Changes to the source are reconciled without duplicating configurations. Manual imports, edited
 configurations, and configurations shared with another subscription are preserved. A failed or
@@ -202,11 +210,18 @@ to edit. Table headers stay visible while scrolling, and smaller displays scroll
 table instead of widening the entire page. All controls are available in English and Persian.
 
 
-## Additional tools (1.2)
+## Additional tools
 
 - Test scope: all filtered/selected rows, untested rows, unsuccessful rows, or both. Invalid settings are excluded from automatic retries; fix them first, then use a row test or All.
 - CSV reports preserve the visible/selected order and include delay, country, Gemini HTTP and error details. Proxy credentials and full configuration links are excluded; spreadsheet formulas in imported names are escaped.
 - Invalid UUID, REALITY keys/short IDs, Vision combinations and Shadowsocks 2022 keys are rejected with a specific explanation. Saved configurations also pass Xray's `run -test` check. Invalid settings are separate from a timeout or test environment error; one invalid node does not fail the entire batch.
 - The web footer and SSH `info` command show the installed Xray version.
+
+## Fixes in 1.3
+
+- Subscription downloads and metadata checks have enforced total deadlines; Stop also cancels country and Gemini requests.
+- Malformed VMess links and invalid DNS labels produce individual errors without abandoning valid neighboring configurations. Legacy Base64 Shadowsocks passwords retain literal special characters.
+- If a selected country disappears, the filter, table and selection reset together. Subscription controls stay disabled during an operation and recover after failures.
+- Initialization repairs the private data-directory and SQLite file permissions described above.
 
 The pinned official Xray **v26.10.17** release is marked **prerelease** by upstream (checked 2026-10-20). The GitHub latest stable endpoint currently points to v26.3.27. This project uses the newest dated official release with pinned SHA-256 checks and integration tests; it does not call it a stable release.

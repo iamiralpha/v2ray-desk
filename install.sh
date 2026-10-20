@@ -73,10 +73,10 @@ if [[ "$SOURCE" != "$APP" ]]; then
   cp -a "$SOURCE/panel" "$SOURCE/tools" "$SOURCE/manage.py" "$SOURCE/admin.py" "$SOURCE/requirements.txt" "$APP/"
 fi
 chown -R root:root "$APP"
-chmod -R a+rX "$APP"
+chmod -R a+rX,go-w "$APP"
 python3 -m venv "$APP/venv"
 "$APP/venv/bin/pip" install --disable-pip-version-check -r "$APP/requirements.txt"
-chmod -R a+rX "$APP/venv"
+chmod -R a+rX,go-w "$APP/venv"
 if [[ "${PANEL_XRAY_PREINSTALLED:-0}" != "1" ]]; then
   python3 "$APP/tools/install_xray.py" --destination "$APP/bin/xray"
 fi
