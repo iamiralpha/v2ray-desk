@@ -138,12 +138,11 @@ async function load() {
   controller?.abort(); controller = new AbortController();
   const params = new URLSearchParams({page: String(page), q: $("public-search").value.trim()});
   for (const key of ["country", "protocol", "status", "gemini", "sort"]) params.set(key, $("public-" + key).value);
-  $("public-refresh").disabled = true;
   try {
     const data = await read("/api/public/configs?" + params, controller.signal);
     if (current === requestNumber) { render(data); notice(""); }
   } catch (error) { if (error.name !== "AbortError" && current === requestNumber) notice(error.message, true); }
-  finally { if (current === requestNumber) { $("public-refresh").disabled = false; loading = false; syncSelection(); } }
+  finally { if (current === requestNumber) { loading = false; syncSelection(); } }
 }
 for (const key of ["country", "protocol", "status", "gemini", "sort"]) {
   $("public-" + key).addEventListener("change", () => { page = 1; clearSelection(); load(); });
@@ -154,7 +153,6 @@ $("public-clear-selection").addEventListener("click", clearSelection);
 $("public-copy-selected").addEventListener("click", copySelected);
 $("public-prev").addEventListener("click", () => { page = Math.max(1, page - 1); load(); });
 $("public-next").addEventListener("click", () => { page += 1; load(); });
-$("public-refresh").addEventListener("click", load);
 $("public-copy-close").addEventListener("click", () => $("public-copy-dialog").close());
 setInterval(() => { if (!document.hidden && !$("public-copy-dialog").open) load(); }, 15000);
 load();
