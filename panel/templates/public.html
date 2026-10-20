@@ -1,0 +1,44 @@
+{% set en = language == 'en' %}
+<!doctype html>
+<html lang="{{ 'en' if en else 'fa' }}" dir="{{ 'ltr' if en else 'rtl' }}">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="app-base" content="{{ request.script_root }}">
+  <title>{{ 'Connections' if en else 'کانفیگ‌ها' }} · V2Ray Desk</title>
+  <link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static',filename='public.css') }}">
+  <link rel="icon" href="{{ url_for('static',filename='icon.svg') }}" type="image/svg+xml">
+  <script src="{{ url_for('static',filename='public.js') }}" defer></script>
+</head>
+<body class="public-page">
+  <header class="public-topbar">
+    <a class="brand" href="{{ url_for('index') }}"><span class="brand-mark">V<span>2</span></span><span dir="ltr">V2Ray <b>Desk</b><small>{{ 'Your connection workspace' if en else 'میز کار اتصال‌های شما' }}</small></span></a>
+    <nav aria-label="{{ 'Navigation' if en else 'راهبری' }}"><a class="language-switch" href="{{ url_for('index',lang='fa' if en else 'en') }}">{{ 'فارسی' if en else 'English' }}</a><a class="primary" href="{{ url_for('login') }}">{{ 'Admin sign in' if en else 'ورود مدیریت' }} ↗</a></nav>
+  </header>
+  <main class="public-workspace">
+    <section class="public-hero"><div><p class="eyebrow">{{ 'YOUR CONNECTIONS, IN ORDER' if en else 'اتصال‌های شما، مرتب و آماده' }}</p><h1>{{ 'Find your next connection.' if en else 'اتصال بهتر را پیدا کن.' }}</h1><p>{{ 'Choose a country, compare Real Delay, and copy a configuration.' if en else 'کشور را انتخاب کن، تأخیر واقعی را مقایسه کن و کانفیگ را بردار.' }}</p></div><span class="public-live"><span class="dot"></span> REAL DELAY</span></section>
+    <section class="stats public-stats" aria-label="{{ 'Statistics' if en else 'آمار' }}">
+      <article><span class="stat-icon neutral">▦</span><div><p>{{ 'All configurations' if en else 'همهٔ کانفیگ‌ها' }}</p><strong id="public-total">—</strong></div></article>
+      <article><span class="stat-icon good">↗</span><div><p>{{ 'Responding' if en else 'دارای پاسخ' }}</p><strong id="public-healthy">—</strong></div></article>
+      <article><span class="stat-icon fast">ϟ</span><div><p>{{ 'Best Real Delay' if en else 'کمترین تأخیر واقعی' }}</p><strong id="public-best">—</strong></div></article>
+    </section>
+    <section class="collection">
+      <div class="collection-heading"><div><h2>{{ 'Available configurations' if en else 'فهرست کانفیگ‌ها' }}</h2><p>{{ 'Delay is measured from this server. Gemini HTTP 200 does not guarantee account access.' if en else 'تأخیر از این سرور اندازه‌گیری شده است. پاسخ ۲۰۰ جیمنای تضمین دسترسی حساب نیست.' }}</p></div><button id="public-refresh" class="secondary">↻ {{ 'Refresh results' if en else 'تازه‌سازی نتایج' }}</button></div>
+      <div class="filters">
+        <label class="search"><span aria-hidden="true">⌕</span><input id="public-search" type="search" maxlength="200" placeholder="{{ 'Search by name…' if en else 'جست‌وجوی نام…' }}" aria-label="{{ 'Search' if en else 'جست‌وجو' }}"></label>
+        <select id="public-country" aria-label="{{ 'Country' if en else 'کشور' }}"><option value="">{{ 'All countries' if en else 'همهٔ کشورها' }}</option></select>
+        <select id="public-protocol" aria-label="{{ 'Protocol' if en else 'پروتکل' }}"><option value="">{{ 'All protocols' if en else 'همهٔ پروتکل‌ها' }}</option><option value="vless">VLESS</option><option value="vmess">VMess</option><option value="trojan">Trojan</option><option value="ss">Shadowsocks</option></select>
+        <select id="public-status" aria-label="{{ 'Status' if en else 'وضعیت' }}"><option value="">{{ 'All statuses' if en else 'همهٔ وضعیت‌ها' }}</option><option value="healthy">{{ 'Responding' if en else 'دارای پاسخ' }}</option><option value="pending">{{ 'Not tested' if en else 'تست‌نشده' }}</option><option value="failed">{{ 'No response' if en else 'بدون پاسخ' }}</option></select>
+        <select id="public-gemini" aria-label="Gemini"><option value="">{{ 'Gemini: all' if en else 'جیمنای: همه' }}</option><option value="http200">Gemini: HTTP 200</option><option value="blocked">Gemini: HTTP 403</option><option value="login">{{ 'Gemini: sign-in' if en else 'جیمنای: صفحهٔ ورود' }}</option><option value="limited">Gemini: HTTP 429</option></select>
+        <select id="public-sort" aria-label="{{ 'Sort' if en else 'مرتب‌سازی' }}"><option value="latency">{{ 'Lowest Real Delay' if en else 'کمترین تأخیر واقعی' }}</option><option value="newest">{{ 'Newest first' if en else 'جدیدترین‌ها' }}</option></select>
+      </div>
+      <p id="public-notice" role="status" class="public-notice" hidden></p>
+      <div class="table-scroll"><table><thead><tr><th scope="col">#</th><th scope="col">{{ 'Name' if en else 'نام' }}</th><th scope="col">{{ 'Protocol' if en else 'پروتکل' }}</th><th scope="col">{{ 'Exit country' if en else 'کشور خروجی' }}</th><th scope="col">Real Delay</th><th scope="col">{{ 'Status' if en else 'وضعیت' }}</th><th scope="col">Gemini / HTTP</th><th scope="col">{{ 'Last tested' if en else 'آخرین تست' }}</th><th scope="col">{{ 'Copy' if en else 'کپی' }}</th></tr></thead><tbody id="public-rows"></tbody></table></div>
+      <p id="public-empty" class="empty" hidden>{{ 'No configurations match these filters.' if en else 'کانفیگی با این فیلترها پیدا نشد.' }}</p>
+      <footer class="table-footer"><span id="public-count">—</span><div><button class="icon-button" id="public-prev" aria-label="{{ 'Previous page' if en else 'صفحهٔ قبل' }}">{{ '←' if en else '→' }}</button><span id="public-page">1 / 1</span><button class="icon-button" id="public-next" aria-label="{{ 'Next page' if en else 'صفحهٔ بعد' }}">{{ '→' if en else '←' }}</button></div></footer>
+    </section>
+    <p class="footnote">{{ 'Results refresh automatically. Daily checks are managed by the administrator.' if en else 'نتایج خودکار تازه می‌شوند. تست‌های روزانه توسط مدیر تنظیم می‌شوند.' }}<span>V2Ray Desk · 1.4</span></p>
+  </main>
+  <dialog id="public-copy-dialog"><div class="dialog-heading"><h2>{{ 'Configuration link' if en else 'لینک کانفیگ' }}</h2><button id="public-copy-close" class="icon-button" aria-label="{{ 'Close' if en else 'بستن' }}">×</button></div><label for="public-copy-text">{{ 'Copy this link into your client' if en else 'این لینک را کپی و در برنامهٔ خود وارد کنید' }}</label><textarea id="public-copy-text" dir="ltr" readonly rows="6"></textarea></dialog>
+</body>
+</html>
