@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-      - run: node --test tests/test_frontend.js
+      - run: node --test tests/test_frontend.js tests/test_public_frontend.js
       - run: pip install -r requirements.txt pytest
       - run: python tools/install_xray.py --destination /tmp/v2ray-desk-xray
       - run: python -m pytest -q
