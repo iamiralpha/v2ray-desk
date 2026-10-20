@@ -1,0 +1,447 @@
+"use strict";
+const BASE = document.querySelector('meta[name="app-base"]').content;
+const route = (path) => BASE + path;
+const EN = document.documentElement.lang === "en";
+const L = (fa, en) => EN ? en : fa;
+const $ = (id) => document.getElementById(id);
+const csrf = document.querySelector('meta[name="csrf-token"]').content;
+const num = new Intl.NumberFormat(EN ? "en-US" : "fa-IR");
+const names = new Intl.DisplayNames([EN ? "en" : "fa"], {type: "region"});
+let records = [], selected = new Set(), activeCountry = "", page = 1, running = false;
+let fetching = false, pendingDelete = null, toastTimer;
+const perPage = 50;
+const statusNames = {pending: L("تست‌نشده", "Not tested"), healthy: L("دارای پاسخ", "Responding"), failed: L("بدون پاسخ", "No response"), error: L("خطای تست", "Test error"), testing: L("در حال تست", "Testing")};
+const geminiNames = {untested:L("تست‌نشده", "Not tested"),http200:L("پاسخ 200", "HTTP 200"),blocked:L("خطای 403", "HTTP 403"),limited:L("محدودیت 429", "HTTP 429"),login:L("صفحهٔ ورود", "Sign-in page"),redirect:L("انتقال", "Redirect"),unreachable:L("خطای اتصال", "Connection error"),other:L("پاسخ دیگر", "Other response")};
+
+function countryName(code) {
+  if (!code) return L("نامشخص", "Unknown");
+  try { return names.of(code) || code; } catch { return code; }
+}
+function flag(code) {
+  return /^[A-Z]{2}$/.test(code || "") ? String.fromCodePoint(...[...code].map(c => c.charCodeAt(0) + 127397)) : "◎";
+}
+function node(tag, text, className) {
+  const element = document.createElement(tag);
+  if (text !== undefined) element.textContent = text;
+  if (className) element.className = className;
+  return element;
+}
+function toast(message, bad = false) {
+  $("toast").textContent = message;
+  $("toast").classList.toggle("bad-toast", bad);
+  $("toast").hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { $("toast").hidden = true; }, 6500);
+}
+async function api(url, data, method = "POST") {
+  const response = await fetch(route(url), {
+    method: data === undefined ? "GET" : method,
+    headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf},
+    body: data === undefined ? undefined : JSON.stringify(data)
+  });
+  if (response.status === 401) { location.assign(route("/login")); throw Error(L("نشست شما تمام شده است.", "Your session has expired.")); }
+  if (!response.ok) {
+    let message = L("ارتباط با پنل برقرار نشد.", "Could not connect to the panel.");
+    try { message = (await response.json()).error || message; } catch {}
+    throw Error(message);
+  }
+  return response;
+}
+function action(fn) {
+  return async (event) => {
+    const button = event?.currentTarget;
+    const disable = button?.tagName === "BUTTON";
+    if (disable) button.disabled = true;
+    try { await fn(event); }
+    catch (error) { toast(error.message || L("خطای ارتباط؛ دوباره تلاش کنید.", "Connection error. Please try again."), true); }
+    finally { if (disable) button.disabled = false; syncButtons(); }
+  };
+}
+function filtered() {
+  const term = $("search").value.trim().toLowerCase();
+  const status = $("status-filter").value;
+  const gemini = $("gemini-filter").value;
+  const list = records.filter(item => (!activeCountry || (item.country || "unknown") === activeCountry)
+    && (!status || item.status === status)
+    && (!gemini || item.gemini_status === gemini)
+    && (!term || `${item.name} ${item.host} ${item.protocol} ${countryName(item.country)}`.toLowerCase().includes(term)));
+  const sort = $("sort").value, group = $("group").checked;
+  const delay = (item) => item.status === "healthy" && item.latency_ms !== null ? item.latency_ms : null;
+  list.sort((a, b) => {
+    if (group || sort === "country") {
+      const country = (!a.country) - (!b.country) || countryName(a.country).localeCompare(countryName(b.country), EN ? "en" : "fa");
+      if (country) return country;
+    }
+    if (sort.startsWith("latency") || sort === "country") {
+      const av = delay(a), bv = delay(b);
+      if (av === null && bv !== null) return 1;
+      if (av !== null && bv === null) return -1;
+      if (av !== null && bv !== null) return (sort === "latency-desc" ? bv - av : av - bv) || b.id - a.id;
+    }
+    if (sort === "name") return a.name.localeCompare(b.name, EN ? "en" : "fa") || b.id - a.id;
+    return b.id - a.id;
+  });
+  return list;
+}
+function scope() {
+  const list = filtered();
+  return selected.size ? list.filter(row => selected.has(row.id)) : list;
+}
+function syncButtons() {
+  const count = filtered().length;
+  $("import-open").disabled = running;
+  $("empty-import").disabled = running;
+  $("test-btn").disabled = running || scope().length === 0;
+  $("export-btn").disabled = scope().length === 0;
+  $("delete-selected").disabled = running || selected.size === 0;
+  $("delete-failed").disabled = running || !filtered().some(r => r.status === "failed");
+  $("select-filtered").disabled = count === 0;
+  $("test-btn").textContent = selected.size ? L(`▷ تست انتخاب‌شده‌ها (${num.format(selected.size)})`, `▷ Test selected (${num.format(selected.size)})`) : L("▷ تست فهرست", "\u25b7 Test results");
+  $("export-btn").textContent = selected.size ? L("دریافت انتخاب‌شده‌ها ↓", "Export selected \u2193") : L("دریافت فهرست ↓", "Export results \u2193");
+  $("selection-text").textContent = selected.size ? L(`${num.format(selected.size)} کانفیگ انتخاب شده`, `${num.format(selected.size)} configurations selected`) : L("کانفیگی انتخاب نشده", "No configurations selected");
+}
+function resetView() {
+  page = 1;
+  selected.clear();
+  render();
+}
+function renderCountries() {
+  const counts = new Map();
+  records.forEach(item => {
+    const key = item.country || "unknown";
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  $("country-count").textContent = num.format([...counts.keys()].filter(k => k !== "unknown").length);
+  $("country-filter").replaceChildren();
+  const allOption = node("option", L("همهٔ کشورها", "All countries"));
+  allOption.value = ""; $("country-filter").append(allOption);
+  [...counts].sort((a,b) => (a[0] === "unknown") - (b[0] === "unknown") || countryName(a[0]).localeCompare(countryName(b[0]))).forEach(([code,count]) => {
+    const option = node("option", `${countryName(code === "unknown" ? null : code)} (${num.format(count)})`);
+    option.value = code; $("country-filter").append(option);
+  });
+  if (activeCountry && !counts.has(activeCountry)) activeCountry = "";
+  $("country-filter").value = activeCountry;
+  $("country-nav").replaceChildren();
+  [...counts].sort((a, b) => (a[0] === "unknown") - (b[0] === "unknown") || countryName(a[0]).localeCompare(countryName(b[0]), EN ? "en" : "fa"))
+    .forEach(([code, count]) => {
+      const button = node("button", undefined, "nav-item country-item");
+      button.classList.toggle("active", activeCountry === code);
+      button.append(node("span", flag(code), "flag"), node("span", countryName(code === "unknown" ? null : code)), node("b", num.format(count)));
+      button.addEventListener("click", () => { activeCountry = code; resetView(); });
+      $("country-nav").append(button);
+    });
+  if (!counts.size) $("country-nav").append(node("p", L("بعد از اولین تست نمایش داده می‌شود.", "Countries appear after the first test."), "country-empty"));
+  $("all-nav").classList.toggle("active", !activeCountry);
+}
+function render() {
+  const list = filtered();
+  const ids = new Set(list.map(row => row.id));
+  selected = new Set([...selected].filter(id => ids.has(id)));
+  const pages = Math.max(1, Math.ceil(list.length / perPage));
+  page = Math.min(page, pages);
+  const visible = list.slice((page - 1) * perPage, page * perPage);
+  $("stat-total").textContent = num.format(records.length);
+  $("nav-count").textContent = num.format(records.length);
+  $("stat-healthy").textContent = num.format(records.filter(r => r.status === "healthy").length);
+  $("stat-failed").textContent = num.format(records.filter(r => r.status === "failed").length);
+  const delays = records.filter(r => r.status === "healthy" && r.latency_ms !== null).map(r => r.latency_ms);
+  $("stat-best").textContent = delays.length ? `${num.format(Math.round(Math.min(...delays)))} ms` : "—";
+  $("collection-title").replaceChildren(document.createTextNode(activeCountry ? countryName(activeCountry === "unknown" ? null : activeCountry) + " " : L("همهٔ کانفیگ‌ها ", "All configurations ")), node("span", num.format(list.length)));
+  renderCountries();
+  $("rows").replaceChildren();
+  let lastCountry = Symbol();
+  for (const item of visible) {
+    if ($("group").checked && item.country !== lastCountry) {
+      const group = node("tr", undefined, "group-row"), cell = node("td");
+      cell.colSpan = 9;
+      cell.textContent = `${flag(item.country)}  ${countryName(item.country)}`;
+      group.append(cell); $("rows").append(group); lastCountry = item.country;
+    }
+    const tr = node("tr");
+    const checkCell = node("td", undefined, "check-cell"), check = node("input");
+    check.type = "checkbox"; check.checked = selected.has(item.id);
+    check.setAttribute("aria-label", L(`انتخاب ${item.name}`, `Select ${item.name}`));
+    check.addEventListener("change", () => { check.checked ? selected.add(item.id) : selected.delete(item.id); render(); });
+    checkCell.append(check); tr.append(checkCell);
+    const identity = node("td");
+    identity.append(node("strong", item.name, "config-name"), node("small", `${item.host}:${item.port}`, "host"));
+    tr.append(identity);
+    const protocol = node("td"); protocol.append(node("span", item.protocol.toUpperCase(), "protocol")); tr.append(protocol);
+    const country = node("td"); country.append(node("span", `${flag(item.country)} ${countryName(item.country)}`, "country-cell")); tr.append(country);
+    const latency = node("td");
+    if (item.status === "healthy" && item.latency_ms !== null) {
+      const delay = node("strong", `${num.format(Math.round(item.latency_ms))} ms`, "latency");
+      delay.title = L("میانهٔ زمان پاسخ‌های HTTPS موفق؛ شامل اتصال، TLS و دریافت پاسخ", "Median of successful HTTPS requests, including connection, TLS and response");
+      latency.append(delay, node("small", L(`${num.format(item.successes)} از ${num.format(item.samples)} موفق`, `${num.format(item.successes)} of ${num.format(item.samples)} successful`), "success-count"));
+    } else latency.append(node("span", "—", "muted"));
+    tr.append(latency);
+    const status = node("td");
+    const badge = node("span", statusNames[item.status] || item.status, `status ${item.status}`);
+    if (item.error) badge.title = item.error;
+    status.append(badge);
+    if (item.error) {
+      const info = node("button", "ⓘ", "info-button");
+      info.title = item.error;
+      info.setAttribute("aria-label", L("نمایش علت خطا", "Show error details"));
+      info.addEventListener("click", () => toast(item.error, true));
+      status.append(info);
+    }
+    tr.append(status);
+    const geminiCell = node("td");
+    const geminiBadge = node("span", geminiNames[item.gemini_status] || L("تست‌نشده", "Not tested"), "status " + ({http200:"healthy",blocked:"failed",limited:"error",login:"pending",unreachable:"error"}[item.gemini_status] || "pending"));
+    geminiBadge.title = item.gemini_code ? L(`HTTP ${item.gemini_code}؛ پاسخ وب، بدون ورود به حساب گوگل`, `HTTP ${item.gemini_code}; web response without a Google account`) : L("تست درخواست HTTPS به gemini.google.com/app از داخل همین پروکسی", "HTTPS request to gemini.google.com/app through this proxy");
+    geminiCell.append(geminiBadge); tr.append(geminiCell);
+    const checked = node("td", item.checked_at ? new Intl.DateTimeFormat(EN ? "en-US" : "fa-IR", {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}).format(new Date(item.checked_at)) : L("هنوز تست نشده", "Not tested yet"), "checked-date");
+    tr.append(checked);
+    const ops = node("td", undefined, "row-actions");
+    for (const [label, icon, fn, disabled] of [
+      [L("تست این کانفیگ", "Test this configuration"), "▷", () => startTest([item.id]), running],
+      [L("ویرایش کانفیگ", "Edit configuration"), "✎", () => openEdit(item.id), running],
+      [L("کپی لینک", "Copy link"), "⧉", () => copyConfig(item.id), false],
+      [L("حذف کانفیگ", "Delete configuration"), "×", () => askDelete([item.id], false), running]
+    ]) {
+      const button = node("button", icon, "icon-button");
+      button.title = label; button.setAttribute("aria-label", label); button.disabled = disabled;
+      button.addEventListener("click", action(fn)); ops.append(button);
+    }
+    tr.append(ops); $("rows").append(tr);
+  }
+  $("empty").hidden = list.length > 0;
+  $("empty").querySelector("h3").textContent = records.length ? L("نتیجه‌ای پیدا نشد", "No matching configurations") : L("اولین اتصال را اضافه کنید", "Add your first connection");
+  $("empty").querySelector("p").textContent = records.length ? L("فیلتر یا عبارت جست‌وجو را تغییر دهید.", "Try another filter or search term.") : L("لینک‌ها را بچسبانید یا فایل متنی وارد کنید؛ بعد با تست Real Delay بهترین اتصال‌ها را پیدا کنید.", "Paste your links or import a text file, then find the best connections with Real Delay.");
+  $("empty-import").hidden = records.length > 0;
+  $("select-page").checked = visible.length > 0 && visible.every(row => selected.has(row.id));
+  $("select-page").indeterminate = visible.some(row => selected.has(row.id)) && !$("select-page").checked;
+  $("page-info").textContent = list.length ? L(`${num.format((page - 1) * perPage + 1)} تا ${num.format(Math.min(page * perPage, list.length))} از ${num.format(list.length)} کانفیگ`, `${num.format((page - 1) * perPage + 1)}–${num.format(Math.min(page * perPage, list.length))} of ${num.format(list.length)} configurations`) : L("۰ کانفیگ", "0 configurations");
+  $("page-label").textContent = `${num.format(page)} / ${num.format(pages)}`;
+  $("prev-page").disabled = page === 1; $("next-page").disabled = page >= pages;
+  syncButtons();
+}
+async function refresh() {
+  if (fetching) return;
+  fetching = true;
+  try {
+    const data = await (await api("/api/configs")).json();
+    const wasRunning = running;
+    records = data.configs; running = data.job.running;
+    $("job").hidden = !running;
+    $("job-text").textContent = `${data.job.cancelled ? L("در حال توقف", "Stopping") : L("در حال تست Real Delay", "Testing Real Delay")} · ${num.format(data.job.done)} ${L("از", "of")} ${num.format(data.job.total)}`;
+    $("job-progress").max = Math.max(1, data.job.total); $("job-progress").value = data.job.done;
+    $("cancel-test").disabled = data.job.cancelled;
+    if (wasRunning && !running) toast(data.job.cancelled ? L("تست متوقف شد؛ موارد تست‌نشده تغییر نکردند.", "Testing stopped. Queued configurations were left unchanged.") : L("تست فهرست تمام شد.", "Testing complete."));
+    render();
+  } finally { fetching = false; }
+}
+async function startTest(ids) {
+  await api("/api/test", {ids});
+  await refresh();
+}
+function openImport() {
+  $("import-result").hidden = true;
+  $("import-dialog").showModal();
+}
+async function openEdit(id) {
+  const data = await (await api(`/api/configs/${id}`)).json();
+  $("edit-id").value = data.id; $("edit-name").value = data.name; $("edit-uri").value = data.uri;
+  $("edit-dialog").showModal();
+}
+async function copyConfig(id) {
+  const data = await (await api(`/api/configs/${id}`)).json();
+  if (!navigator.clipboard) {
+    await openEdit(id); $("edit-uri").select(); toast(L("لینک انتخاب شد؛ آن را کپی کنید.", "The link is selected. Copy it now.")); return;
+  }
+  await navigator.clipboard.writeText(data.uri); toast(L("لینک کپی شد.", "Link copied."));
+}
+function askDelete(ids, failedOnly) {
+  if (!ids.length) return;
+  pendingDelete = {ids, failed_only: failedOnly};
+  $("confirm-message").textContent = L(`${num.format(ids.length)} کانفیگ${failedOnly ? " بدون پاسخ از نتایج فعلی" : " انتخاب‌شده"} حذف شود؟`, `Delete ${num.format(ids.length)} ${failedOnly ? "nonresponding configurations in the current results" : "selected configurations"}?`);
+  $("confirm-dialog").showModal();
+}
+document.querySelectorAll(".close-dialog").forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
+for (const id of ["import-open", "empty-import"]) $(id).addEventListener("click", openImport);
+$("all-nav").addEventListener("click", () => { activeCountry = ""; resetView(); });
+$("country-filter").addEventListener("change", () => { activeCountry = $("country-filter").value; resetView(); });
+for (const id of ["search", "status-filter", "gemini-filter", "sort", "group"]) $(id).addEventListener(id === "search" ? "input" : "change", resetView);
+$("prev-page").addEventListener("click", () => { page--; render(); });
+$("next-page").addEventListener("click", () => { page++; render(); });
+$("select-page").addEventListener("change", () => {
+  filtered().slice((page - 1) * perPage, page * perPage).forEach(row => $("select-page").checked ? selected.add(row.id) : selected.delete(row.id));
+  render();
+});
+$("select-filtered").addEventListener("click", () => { selected = new Set(filtered().map(r => r.id)); render(); });
+$("clear-selection").addEventListener("click", () => { selected.clear(); render(); });
+$("test-btn").addEventListener("click", action(() => startTest(scope().map(row => row.id))));
+$("cancel-test").addEventListener("click", action(async () => { await api("/api/test/cancel", {}); await refresh(); }));
+$("delete-selected").addEventListener("click", () => askDelete([...selected], false));
+$("delete-failed").addEventListener("click", () => askDelete(filtered().filter(row => row.status === "failed").map(row => row.id), true));
+$("confirm-no").addEventListener("click", () => { pendingDelete = null; $("confirm-dialog").close(); });
+$("confirm-yes").addEventListener("click", action(async () => {
+  if (!pendingDelete) return;
+  const data = await (await api("/api/delete", pendingDelete)).json();
+  pendingDelete = null; selected.clear(); $("confirm-dialog").close();
+  toast(L(`${num.format(data.deleted)} کانفیگ حذف شد.`, `Deleted ${num.format(data.deleted)} configurations.`)); await refresh();
+}));
+$("import-file").addEventListener("change", action(async () => {
+  const file = $("import-file").files[0];
+  if (!file) return;
+  if (file.size > 4 * 1024 * 1024) throw Error(L("حداکثر حجم فایل ۴ مگابایت است.", "Maximum file size is 4 MB."));
+  $("import-text").value = await file.text();
+}));
+$("import-form").addEventListener("submit", action(async event => {
+  event.preventDefault();
+  $("import-submit").disabled = true;
+  try {
+    const data = await (await api("/api/import", {text: $("import-text").value})).json();
+    const result = $("import-result"); result.replaceChildren();
+    result.append(node("strong", L(`${num.format(data.added)} اضافه شد · ${num.format(data.duplicates)} تکراری · ${num.format(data.errors.length)} نامعتبر`, `${num.format(data.added)} added · ${num.format(data.duplicates)} duplicate · ${num.format(data.errors.length)} invalid`)));
+    if (data.errors.length) {
+      const ul = node("ul");
+      data.errors.forEach(item => ul.append(node("li", L(`خط ${num.format(item.line)}: ${item.error}`, `Line ${num.format(item.line)}: ${item.error}`))));
+      result.append(ul);
+    } else { $("import-text").value = ""; $("import-file").value = ""; }
+    result.hidden = false;
+    await refresh();
+  } finally { $("import-submit").disabled = false; }
+}));
+$("edit-form").addEventListener("submit", action(async event => {
+  event.preventDefault();
+  await api(`/api/configs/${$("edit-id").value}`, {uri: $("edit-uri").value, name: $("edit-name").value}, "PUT");
+  $("edit-dialog").close(); toast(L("تغییرات ذخیره شد؛ کانفیگ را دوباره تست کنید.", "Changes saved. Test the configuration again.")); await refresh();
+}));
+$("export-btn").addEventListener("click", action(async () => {
+  const response = await api("/api/export", {ids: scope().map(row => row.id)});
+  const url = URL.createObjectURL(await response.blob());
+  const anchor = node("a"); anchor.href = url; anchor.download = "v2ray-configs.txt";
+  document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}));
+$("logout").addEventListener("click", action(async () => { await api("/api/logout", {}); location.assign(route("/login")); }));
+$("password-open").addEventListener("click", () => $("password-dialog").showModal());
+$("password-form").addEventListener("submit", action(async event => {
+  event.preventDefault();
+  if ($("new-password").value !== $("confirm-password").value) throw Error(L("رمز جدید و تکرار آن یکسان نیست.", "New passwords do not match."));
+  await api("/api/password", {current: $("current-password").value, password: $("new-password").value});
+  location.assign(route("/login"));
+}));
+action(refresh)();
+setInterval(() => { if (!document.hidden) action(refresh)(); }, 3000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) action(refresh)(); });
+
+const subsDialog = node("dialog", undefined, "subscriptions-dialog");
+subsDialog.id = "subscriptions-dialog";
+const subsHeading = node("div", undefined, "dialog-heading");
+subsHeading.append(node("h2", L("مدیریت ساب‌ها", "Subscriptions")));
+const subsClose = node("button", "×", "icon-button");
+subsClose.setAttribute("aria-label", L("بستن", "Close"));
+subsClose.onclick = () => subsDialog.close(); subsHeading.append(subsClose);
+const subsForm = node("form");
+const subName = node("input"), subUrl = node("input"), subEnabled = node("input");
+subName.id = "subscription-name"; subName.required = true; subName.maxLength = 200;
+subUrl.id = "subscription-url"; subUrl.type = "url"; subUrl.required = true;
+subUrl.dir = "ltr"; subUrl.maxLength = 4096; subUrl.placeholder = "https://example.com/subscription";
+subEnabled.type = "checkbox"; subEnabled.checked = true;
+for (const [input, title] of [[subName,L("نام ساب","Subscription name")],[subUrl,L("لینک ساب","Subscription URL")]]) {
+  const label = node("label", title); label.htmlFor = input.id; subsForm.append(label,input);
+}
+const enabledLabel = node("label", undefined, "group-toggle");
+enabledLabel.append(subEnabled, document.createTextNode(L("در به‌روزرسانی همه لحاظ شود","Include in refresh all")));
+const subSubmit = node("button", L("افزودن و دریافت","Add & sync"), "primary");
+subSubmit.type = "submit";
+const subReset = node("button", L("فرم جدید","New subscription"), "secondary"); subReset.type = "button";
+const subActions = node("div", undefined, "dialog-footer"); subActions.append(subReset,subSubmit);
+subsForm.append(enabledLabel,subActions);
+const subsRefreshAll = node("button",L("به‌روزرسانی ساب‌های فعال","Refresh enabled subscriptions"),"secondary");
+const subsList = node("div", undefined, "subscription-list");
+const subsStatus = node("p", "", "hint"); subsStatus.setAttribute("role","status");
+subsDialog.append(subsHeading,node("p",L("لینک مستقیم یا Base64؛ حداکثر ۲۰۰۰ کانفیگ در هر ساب. کانفیگ‌های دستی و ویرایش‌شده هنگام همگام‌سازی حفظ می‌شوند.","Plain text or Base64; up to 2,000 configurations per subscription. Manual and edited configurations are preserved during sync."),"muted"),subsForm,subsStatus,subsRefreshAll,subsList);
+document.body.append(subsDialog);
+let subscriptionId = null, subWorking = false;
+function resetSubForm() {
+  subscriptionId = null; subsForm.reset(); subEnabled.checked = true;
+  subSubmit.textContent = L("افزودن و دریافت","Add & sync");
+}
+subReset.onclick = resetSubForm;
+async function syncSubscription(id) {
+  subsStatus.textContent = L("در حال دریافت ساب…","Downloading subscription…");
+  const data = await (await api(`/api/subscriptions/${id}/refresh`,{})).json();
+  subsStatus.textContent = L(`${data.total} کانفیگ · ${data.added} جدید · ${data.removed} حذف‌شده · ${data.invalid} پشتیبانی‌نشده`,`${data.total} configurations · ${data.added} added · ${data.removed} removed · ${data.invalid} unsupported`);
+  await refresh();
+}
+async function loadSubscriptions() {
+  const data = await (await api("/api/subscriptions")).json();
+  subsList.replaceChildren();
+  if (!data.subscriptions.length) subsList.append(node("p",L("هنوز سابی اضافه نشده است.","No subscriptions yet."),"muted"));
+  for (const sub of data.subscriptions) {
+    const card = node("article",undefined,"subscription-card");
+    card.append(node("strong",sub.name),node("small",sub.host,"host"));
+    const updated = sub.updated_at ? new Date(sub.updated_at).toLocaleString(EN ? "en-US":"fa-IR") : L("دریافت نشده","Never synced");
+    card.append(node("p",`${num.format(sub.config_count)} ${L("کانفیگ","configurations")} · ${updated} · ${sub.enabled ? L("فعال","Enabled"):L("غیرفعال","Disabled")}`,"hint"));
+    if (sub.error) card.append(node("p",sub.error,"subscription-error"));
+    if (sub.invalid_count) card.append(node("p",L(`${sub.invalid_count} لینک نامعتبر یا پشتیبانی‌نشده رد شد.`,`${sub.invalid_count} invalid or unsupported links skipped.`),"hint"));
+    const buttons = node("div",undefined,"actions");
+    const controls = [
+      [L("به‌روزرسانی","Refresh"), async () => syncSubscription(sub.id)],
+      [L("ویرایش","Edit"), async () => {
+        const detail = await (await api(`/api/subscriptions/${sub.id}`)).json();
+        subscriptionId = sub.id; subName.value = detail.name; subUrl.value = detail.url; subEnabled.checked = !!detail.enabled;
+        subSubmit.textContent = L("ذخیره و دریافت","Save & sync"); subName.focus();
+      }],
+      [L("حذف","Delete"), async () => {
+        const choice = await chooseSubRemoval(sub.name);
+        if (choice === null) return;
+        await api(`/api/subscriptions/${sub.id}`,{remove_configs:choice},"DELETE");
+        if (subscriptionId === sub.id) resetSubForm();
+        await refresh();
+      }]
+    ];
+    for (const [label, fn] of controls) {
+      const button = node("button",label,"secondary");
+      button.disabled = subWorking || sub.syncing;
+      button.onclick = action(async () => { try { await fn(); } finally { await loadSubscriptions(); } });
+      buttons.append(button);
+    }
+    card.append(buttons); subsList.append(card);
+  }
+  return data.subscriptions;
+}
+function chooseSubRemoval(name) {
+  return new Promise(resolve => {
+    const dialog = node("dialog");
+    dialog.append(node("h2",L("حذف ساب","Delete subscription")),node("p",name));
+    const label = node("label",undefined,"group-toggle"), remove = node("input"); remove.type = "checkbox";
+    label.append(remove,document.createTextNode(L("کانفیگ‌های اختصاصی این ساب هم حذف شوند","Also delete configurations belonging only to this subscription")));
+    dialog.append(label,node("p",L("کانفیگ‌های دستی، ویرایش‌شده یا مشترک با ساب‌های دیگر حفظ می‌شوند.","Manual, edited and shared configurations are preserved."),"hint"));
+    const actions = node("div",undefined,"dialog-footer");
+    for (const [text, answer] of [[L("انصراف","Cancel"),null],[L("حذف","Delete"),true]]) {
+      const button = node("button",text,answer ? "danger-button":"secondary");
+      button.onclick = () => { resolve(answer === null ? null : remove.checked); dialog.close(); dialog.remove(); };
+      actions.append(button);
+    }
+    dialog.addEventListener("cancel",() => { resolve(null); dialog.remove(); });
+    dialog.append(actions); document.body.append(dialog); dialog.showModal();
+  });
+}
+$("subscriptions-open").onclick = action(async () => { await loadSubscriptions(); subsDialog.showModal(); });
+subsForm.onsubmit = action(async event => {
+  event.preventDefault();
+  if (subWorking) return;
+  subWorking = true; subSubmit.disabled = true;
+  try {
+    const result = await (await api(subscriptionId ? `/api/subscriptions/${subscriptionId}`:"/api/subscriptions",
+      {name:subName.value,url:subUrl.value,enabled:subEnabled.checked},subscriptionId ? "PUT":"POST")).json();
+    subscriptionId = result.id; subSubmit.textContent = L("ذخیره و دریافت","Save & sync");
+    await syncSubscription(result.id); resetSubForm();
+  } finally { subWorking = false; subSubmit.disabled = false; await loadSubscriptions(); }
+});
+subsRefreshAll.onclick = action(async () => {
+  if (subWorking) return;
+  subWorking = true; subSubmit.disabled = true;
+  let failures = 0;
+  try {
+    const subs = await loadSubscriptions();
+    for (const sub of subs.filter(item => item.enabled)) {
+      try { await syncSubscription(sub.id); } catch { failures++; }
+    }
+    subsStatus.textContent = L(`به‌روزرسانی تمام شد؛ ${failures} خطا.`,`Refresh complete; ${failures} failed.`);
+  } finally { subWorking = false; subSubmit.disabled = false; await loadSubscriptions(); }
+});
