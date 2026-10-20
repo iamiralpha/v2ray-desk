@@ -61,4 +61,17 @@ def create_public_blueprint(db_path):
             return jsonify(error="کانفیگ پیدا نشد."), 404
         return jsonify(uri=row["uri"])
 
+    @public.get("/api/public/copy")
+    def copy_configs():
+        raw_ids = request.args.get("ids", "").split(",")
+        if (not 1 <= len(raw_ids) <= 500
+                or any(not re.fullmatch(r"[1-9][0-9]{0,17}", value) for value in raw_ids)):
+            raise ConfigError("بین ۱ تا ۵۰۰ شناسهٔ معتبر کانفیگ انتخاب کنید.")
+        ids = list(dict.fromkeys(int(value) for value in raw_ids))
+        placeholders = ",".join("?" for _ in ids)
+        with connect(db_path) as db:
+            rows = db.execute("SELECT id,uri FROM configs WHERE id IN (" + placeholders + ")", ids).fetchall()
+        by_id = {row["id"]: dict(row) for row in rows}
+        return jsonify(configs=[by_id[config_id] for config_id in ids if config_id in by_id])
+
     return public

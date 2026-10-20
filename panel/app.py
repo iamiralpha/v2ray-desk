@@ -139,7 +139,7 @@ def create_app(data_dir=None, test_config=None):
             expected = session.get("csrf", "")
             if not expected or not hmac.compare_digest(supplied, expected):
                 return jsonify(error="نشست نامعتبر است؛ صفحه را تازه کنید."), 403
-        if request.endpoint not in {"login", "static", "index", "public.configs", "public.config"}:
+        if request.endpoint not in {"login", "static", "index", "public.configs", "public.config", "public.copy_configs"}:
             authenticated = session.get("authenticated") and session.get("auth_version") == setting(db_path, "auth_version")
             if not authenticated:
                 if request.path.startswith("/api/"):

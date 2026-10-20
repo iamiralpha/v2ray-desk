@@ -53,6 +53,11 @@ def engine_validation(executable, path, timeout=12):
         return
     # Never return raw engine output: it may contain a config's credentials.
     diagnostic = (check.stdout + check.stderr).decode("utf-8", "replace").lower()
+    if (check.returncode < 0 or check.returncode >= 0x80000000
+            or any(message in diagnostic for message in (
+                "fatal error:", "panic:", "out of memory", "cannot allocate memory",
+                "failed to create new os thread", "too many open files", "permission denied", "access is denied"))):
+        raise ConfigError("The test core could not validate configurations.")
     for keywords, message in [
         (("publickey", "public key"), "Xray rejected the REALITY public key."),
         (("shortid", "short id"), "Xray rejected the REALITY short ID."),
@@ -191,6 +196,17 @@ def make_batch_config(prepared):
     return config
 
 
+def validate_batch(prepared, executable):
+    """Check a split without opening listeners or starting network probes."""
+    # Xray's -test mode does not bind these unique placeholder ports.
+    validation_rows = [{**item, "port": 20000 + index} for index, item in enumerate(prepared)]
+    with tempfile.TemporaryDirectory(prefix="v2ray-desk-check-") as folder:
+        path = Path(folder) / "config.json"
+        path.write_text(json.dumps(make_batch_config(validation_rows)), encoding="utf-8")
+        path.chmod(0o600)
+        engine_validation(executable, path)
+
+
 @contextmanager
 def shared_core(prepared, executable, stop):
     process, reservations = None, []
@@ -210,6 +226,9 @@ def shared_core(prepared, executable, stop):
             engine_validation(executable, path)
             for sock in reservations:
                 sock.close()
+            if stop.is_set():
+                yield {}
+                return
             process = subprocess.Popen([executable, "run", "-c", str(path)], **kwargs)
             # v2rayN also waits one second before issuing the probes.
             stop.wait(1)
@@ -305,7 +324,7 @@ def probe(uri, executable, stop, timeout=5, samples=2, target="google", gemini=T
             return probe_connection(port, stop, timeout, samples, target, gemini, country)
         except InvalidConfigError as exc:
             return result("invalid", str(exc))
-        except (OSError, subprocess.TimeoutExpired):
+        except (ConfigError, OSError, subprocess.TimeoutExpired):
             return result("error", "خطا در اجرای هستهٔ تست؛ وضعیت نصب Xray را بررسی کنید.")
         finally:
             if process is not None and process.poll() is None:
@@ -479,30 +498,66 @@ class TestManager:
             for future in futures:
                 future.result()
 
-    def _batch(self, prepared, options):
+    def _isolate_invalid(self, prepared, error):
+        """Collect valid survivors before starting any network testing."""
         if not prepared or self.stop.is_set():
-            return
-        try:
-            with shared_core(prepared, self.executable, self.stop) as ports:
-                with self.lock:
-                    self.state["phase"] = "testing"
-                self._drain(prepared, options, ports)
-        except CoreStoppedError:
-            self._job_unsafe = True
-            for row in prepared:
-                if self._outcomes.get(row["id"]) == "failed":
-                    self._save(row, result("error", "The batch test core stopped before the batch completed."))
-        except (ConfigError, OSError, subprocess.TimeoutExpired) as exc:
-            if not isinstance(exc, InvalidConfigError):
+            return []
+        if len(prepared) == 1:
+            self._save(prepared[0], result("invalid", str(error)))
+            return []
+        middle = len(prepared) // 2
+        valid = []
+        for part in (prepared[:middle], prepared[middle:]):
+            if self.stop.is_set():
+                break
+            try:
+                validate_batch(part, self.executable)
+            except InvalidConfigError as exc:
+                valid.extend(self._isolate_invalid(part, exc))
+            else:
+                valid.extend(part)
+        return valid
+
+    def _core_error(self, prepared):
+        self._job_unsafe = True
+        for row in prepared:
+            if self.stop.is_set():
+                break
+            # Preserve isolated invalid rows and responses already proven healthy.
+            if row["id"] not in self._outcomes or self._outcomes[row["id"]] == "failed":
+                self._save(row, result("error", "The batch test core could not start."))
+
+    def _batch(self, prepared, options):
+        isolated = False
+        while prepared and not self.stop.is_set():
+            try:
+                with shared_core(prepared, self.executable, self.stop) as ports:
+                    with self.lock:
+                        self.state["phase"] = "testing"
+                    self._drain(prepared, options, ports)
+                return
+            except CoreStoppedError:
                 self._job_unsafe = True
-            # Isolate invalid engine settings rather than failing every node.
-            if len(prepared) > 1:
-                middle = len(prepared) // 2
-                self._batch(prepared[:middle], options)
-                self._batch(prepared[middle:], options)
-            elif not self.stop.is_set():
-                self._save(prepared[0], result("invalid", str(exc)) if isinstance(exc, InvalidConfigError)
-                           else result("error", "The batch test core could not start."))
+                for row in prepared:
+                    if self._outcomes.get(row["id"]) == "failed":
+                        self._save(row, result("error", "The batch test core stopped before the batch completed."))
+                return
+            except InvalidConfigError as exc:
+                if isolated:
+                    # A combined batch of validated survivors should be valid.
+                    # Do not repeat isolation indefinitely on an engine failure.
+                    self._core_error(prepared)
+                    return
+                try:
+                    prepared = self._isolate_invalid(prepared, exc)
+                except (ConfigError, OSError, subprocess.TimeoutExpired):
+                    self._core_error(prepared)
+                    return
+                isolated = True
+            except (ConfigError, OSError, subprocess.TimeoutExpired):
+                # Resource/startup failures cannot be isolated to one config.
+                self._core_error(prepared)
+                return
 
     def _run(self, rows, options):
         completed = False

@@ -1,5 +1,6 @@
 """English translations for server-side diagnostics. User data is never translated."""
 MESSAGES = {
+    "بین ۱ تا ۵۰۰ شناسهٔ معتبر کانفیگ انتخاب کنید.": "Select between 1 and 500 valid configuration IDs.",
     "REALITY با این نوع انتقال سازگار نیست.": "REALITY is not compatible with this transport.",
     "Shadowsocks با پارامتر اضافه یا plugin پشتیبانی نمی‌شود.": "Shadowsocks plugins and extra parameters are not supported.",
     "VMess قدیمی با alterId غیرصفر پشتیبانی نمی‌شود.": "Legacy VMess with a nonzero alterId is not supported.",
