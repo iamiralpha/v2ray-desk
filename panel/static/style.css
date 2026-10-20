@@ -57,3 +57,4 @@ html[dir=ltr] .collection-heading h2 span{margin-right:0;margin-left:6px}
 @media(max-width:600px){.test-settings{padding:12px}.test-settings label{font-size:11px}.stats article{padding:12px;min-height:94px}.collection-heading,.filters,.selection-bar{padding-inline:12px}.test-settings .group-toggle{width:auto;margin:0}.page-heading{gap:10px}.table-scroll{max-height:65dvh}}
 
 .status.invalid{color:#7843a1;background:#f3eafa}.actions{flex-wrap:wrap}.collection-heading{gap:16px}.footnote b{font-weight:500;white-space:nowrap}
+.dialog-notice{margin:0 0 16px;padding:12px 15px;border:1px solid #c5d9c6;border-radius:9px;background:#edf5e8;color:#245b36;font-size:12px;line-height:1.8;overflow-wrap:anywhere}.dialog-notice.bad-notice{border-color:#e8bdb5;background:#fff0ec;color:#8b3026}

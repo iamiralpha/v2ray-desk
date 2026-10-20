@@ -31,11 +31,33 @@ function node(tag, text, className) {
   return element;
 }
 function toast(message, bad = false) {
+  clearTimeout(toastTimer);
+  const dialog = [...document.querySelectorAll("dialog[open]")].at(-1);
+  if (dialog) {
+    $("toast").hidden = true;
+    let notice = dialog.querySelector(".dialog-notice");
+    if (!notice) {
+      notice = node("p", undefined, "dialog-notice");
+      const heading = dialog.querySelector(".dialog-heading");
+      if (heading) heading.after(notice); else dialog.prepend(notice);
+    }
+    notice.setAttribute("role", bad ? "alert" : "status");
+    notice.setAttribute("aria-atomic", "true");
+    notice.classList.toggle("bad-notice", bad);
+    notice.textContent = message;
+    dialog.scrollTop = 0;
+    return;
+  }
   $("toast").textContent = message;
   $("toast").classList.toggle("bad-toast", bad);
   $("toast").hidden = false;
-  clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { $("toast").hidden = true; }, 6500);
+}
+function openDialog(dialog) {
+  dialog.querySelector(".dialog-notice")?.remove();
+  $("toast").hidden = true;
+  clearTimeout(toastTimer);
+  dialog.showModal();
 }
 async function api(url, data, method = "POST") {
   const response = await fetch(route(url), {
@@ -140,7 +162,10 @@ function renderCountries() {
     const option = node("option", `${countryName(code === "unknown" ? null : code)} (${num.format(count)})`);
     option.value = code; $("country-filter").append(option);
   });
-  if (activeCountry && !counts.has(activeCountry)) activeCountry = "";
+  if (activeCountry && !counts.has(activeCountry)) {
+    activeCountry = ""; filterCache = null; page = 1;
+    selected.clear(); lastSelectedId = null;
+  }
   $("country-filter").value = activeCountry;
   $("country-nav").replaceChildren();
   [...counts].sort((a, b) => (a[0] === "unknown") - (b[0] === "unknown") || countryName(a[0]).localeCompare(countryName(b[0]), EN ? "en" : "fa"))
@@ -155,6 +180,7 @@ function renderCountries() {
   $("all-nav").classList.toggle("active", !activeCountry);
 }
 function render() {
+  renderCountries();
   const list = filtered();
   const ids = new Set(list.map(row => row.id));
   selected = new Set([...selected].filter(id => ids.has(id)));
@@ -168,7 +194,6 @@ function render() {
   const delays = records.filter(r => r.status === "healthy" && r.latency_ms !== null).map(r => r.latency_ms);
   $("stat-best").textContent = delays.length ? `${num.format(Math.round(Math.min(...delays)))} ms` : "—";
   $("collection-title").replaceChildren(document.createTextNode(activeCountry ? countryName(activeCountry === "unknown" ? null : activeCountry) + " " : L("همهٔ کانفیگ‌ها ", "All configurations ")), node("span", num.format(list.length)));
-  renderCountries();
   $("rows").replaceChildren();
   let lastCountry = Symbol();
   for (const item of visible) {
@@ -323,12 +348,12 @@ for (const button of document.querySelectorAll(".sort-header")) {
 }
 function openImport() {
   $("import-result").hidden = true;
-  $("import-dialog").showModal();
+  openDialog($("import-dialog"));
 }
 async function openEdit(id) {
   const data = await (await api(`/api/configs/${id}`)).json();
   $("edit-id").value = data.id; $("edit-name").value = data.name; $("edit-uri").value = data.uri;
-  $("edit-dialog").showModal();
+  openDialog($("edit-dialog"));
 }
 async function copyConfig(id) {
   const data = await (await api(`/api/configs/${id}`)).json();
@@ -341,7 +366,7 @@ function askDelete(ids, failedOnly) {
   if (!ids.length) return;
   pendingDelete = {ids, failed_only: failedOnly};
   $("confirm-message").textContent = L(`${num.format(ids.length)} کانفیگ${failedOnly ? " بدون پاسخ از نتایج فعلی" : " انتخاب‌شده"} حذف شود؟`, `Delete ${num.format(ids.length)} ${failedOnly ? "nonresponding configurations in the current results" : "selected configurations"}?`);
-  $("confirm-dialog").showModal();
+  openDialog($("confirm-dialog"));
 }
 document.querySelectorAll(".close-dialog").forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
 for (const id of ["import-open", "empty-import"]) $(id).addEventListener("click", openImport);
@@ -408,7 +433,7 @@ $("report-btn").addEventListener("click", action(async () => {
   document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }));
 $("logout").addEventListener("click", action(async () => { await api("/api/logout", {}); location.assign(route("/login")); }));
-$("password-open").addEventListener("click", () => $("password-dialog").showModal());
+$("password-open").addEventListener("click", () => openDialog($("password-dialog")));
 $("password-form").addEventListener("submit", action(async event => {
   event.preventDefault();
   if ($("new-password").value !== $("confirm-password").value) throw Error(L("رمز جدید و تکرار آن یکسان نیست.", "New passwords do not match."));
@@ -448,11 +473,24 @@ const subsStatus = node("p", "", "hint"); subsStatus.setAttribute("role","status
 subsDialog.append(subsHeading,node("p",L("لینک مستقیم یا Base64؛ حداکثر ۲۰۰۰ کانفیگ در هر ساب. کانفیگ‌های دستی و ویرایش‌شده هنگام همگام‌سازی حفظ می‌شوند.","Plain text or Base64; up to 2,000 configurations per subscription. Manual and edited configurations are preserved during sync."),"muted"),subsForm,subsStatus,subsRefreshAll,subsList);
 document.body.append(subsDialog);
 let subscriptionId = null, subWorking = false;
+function syncSubscriptionControls() {
+  for (const control of [subName, subUrl, subEnabled, subSubmit, subReset, subsRefreshAll]) control.disabled = subWorking;
+  for (const button of subsList.querySelectorAll("button")) button.disabled = subWorking || button.dataset.syncing === "true";
+}
+async function withSubscriptionLock(fn) {
+  if (subWorking) return;
+  subWorking = true; syncSubscriptionControls();
+  try { await fn(); }
+  finally {
+    try { await loadSubscriptions(); }
+    finally { subWorking = false; syncSubscriptionControls(); }
+  }
+}
 function resetSubForm() {
   subscriptionId = null; subsForm.reset(); subEnabled.checked = true;
   subSubmit.textContent = L("افزودن و دریافت","Add & sync");
 }
-subReset.onclick = resetSubForm;
+subReset.onclick = () => { if (!subWorking) resetSubForm(); };
 async function syncSubscription(id) {
   subsStatus.textContent = L("در حال دریافت ساب…","Downloading subscription…");
   const data = await (await api(`/api/subscriptions/${id}/refresh`,{})).json();
@@ -476,8 +514,8 @@ async function loadSubscriptions() {
       [L("ویرایش","Edit"), async () => {
         const detail = await (await api(`/api/subscriptions/${sub.id}`)).json();
         subscriptionId = sub.id; subName.value = detail.name; subUrl.value = detail.url; subEnabled.checked = !!detail.enabled;
-        subSubmit.textContent = L("ذخیره و دریافت","Save & sync"); subName.focus();
-      }],
+        subSubmit.textContent = L("ذخیره و دریافت","Save & sync");
+      }, subName],
       [L("حذف","Delete"), async () => {
         const choice = await chooseSubRemoval(sub.name);
         if (choice === null) return;
@@ -486,10 +524,14 @@ async function loadSubscriptions() {
         await refresh();
       }]
     ];
-    for (const [label, fn] of controls) {
+    for (const [label, fn, focusAfter] of controls) {
       const button = node("button",label,"secondary");
+      button.dataset.syncing = String(!!sub.syncing);
       button.disabled = subWorking || sub.syncing;
-      button.onclick = action(async () => { try { await fn(); } finally { await loadSubscriptions(); } });
+      button.onclick = action(async () => {
+        await withSubscriptionLock(fn);
+        if (!subWorking) focusAfter?.focus();
+      });
       buttons.append(button);
     }
     card.append(buttons); subsList.append(card);
@@ -510,30 +552,25 @@ function chooseSubRemoval(name) {
       actions.append(button);
     }
     dialog.addEventListener("cancel",() => { resolve(null); dialog.remove(); });
-    dialog.append(actions); document.body.append(dialog); dialog.showModal();
+    dialog.append(actions); document.body.append(dialog); openDialog(dialog);
   });
 }
-$("subscriptions-open").onclick = action(async () => { await loadSubscriptions(); subsDialog.showModal(); });
+$("subscriptions-open").onclick = action(async () => { await loadSubscriptions(); openDialog(subsDialog); });
 subsForm.onsubmit = action(async event => {
   event.preventDefault();
-  if (subWorking) return;
-  subWorking = true; subSubmit.disabled = true;
-  try {
-    const result = await (await api(subscriptionId ? `/api/subscriptions/${subscriptionId}`:"/api/subscriptions",
-      {name:subName.value,url:subUrl.value,enabled:subEnabled.checked},subscriptionId ? "PUT":"POST")).json();
+  await withSubscriptionLock(async () => {
+    const targetId = subscriptionId;
+    const result = await (await api(targetId ? `/api/subscriptions/${targetId}`:"/api/subscriptions",
+      {name:subName.value,url:subUrl.value,enabled:subEnabled.checked},targetId ? "PUT":"POST")).json();
     subscriptionId = result.id; subSubmit.textContent = L("ذخیره و دریافت","Save & sync");
     await syncSubscription(result.id); resetSubForm();
-  } finally { subWorking = false; subSubmit.disabled = false; await loadSubscriptions(); }
+  });
 });
-subsRefreshAll.onclick = action(async () => {
-  if (subWorking) return;
-  subWorking = true; subSubmit.disabled = true;
+subsRefreshAll.onclick = action(() => withSubscriptionLock(async () => {
   let failures = 0;
-  try {
-    const subs = await loadSubscriptions();
-    for (const sub of subs.filter(item => item.enabled)) {
-      try { await syncSubscription(sub.id); } catch { failures++; }
-    }
-    subsStatus.textContent = L(`به‌روزرسانی تمام شد؛ ${failures} خطا.`,`Refresh complete; ${failures} failed.`);
-  } finally { subWorking = false; subSubmit.disabled = false; await loadSubscriptions(); }
-});
+  const subs = await loadSubscriptions();
+  for (const sub of subs.filter(item => item.enabled)) {
+    try { await syncSubscription(sub.id); } catch { failures++; }
+  }
+  subsStatus.textContent = L(`به‌روزرسانی تمام شد؛ ${failures} خطا.`,`Refresh complete; ${failures} failed.`);
+}));
