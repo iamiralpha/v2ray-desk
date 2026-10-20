@@ -53,6 +53,23 @@ def initialize(data_dir):
         db.execute("INSERT OR IGNORE INTO settings VALUES ('secret',?)", (secrets.token_hex(32),))
         db.execute("INSERT OR IGNORE INTO settings VALUES ('auth_version','1')")
         columns = {row["name"] for row in db.execute("PRAGMA table_info(configs)")}
+        if "delay_codes" not in columns:
+            db.execute("ALTER TABLE configs ADD COLUMN delay_codes TEXT NOT NULL DEFAULT '[]'")
+        if "transport" not in columns:
+            db.execute("ALTER TABLE configs ADD COLUMN transport TEXT NOT NULL DEFAULT ''")
+            db.execute("ALTER TABLE configs ADD COLUMN security TEXT NOT NULL DEFAULT ''")
+            from .parser import ConfigError, parse_uri
+            for row in db.execute("SELECT id,uri FROM configs").fetchall():
+                try:
+                    parsed = parse_uri(row["uri"])
+                    db.execute("UPDATE configs SET transport=?,security=? WHERE id=?",
+                               (parsed["transport"], parsed["security"], row["id"]))
+                except ConfigError:
+                    pass
+        if "delay_version" not in columns:
+            db.execute("ALTER TABLE configs ADD COLUMN delay_version INTEGER NOT NULL DEFAULT 1")
+            db.execute("ALTER TABLE configs ADD COLUMN delay_target TEXT")
+            db.execute("ALTER TABLE configs ADD COLUMN delay_samples TEXT NOT NULL DEFAULT '[]'")
         if "manual" not in columns:
             db.execute("ALTER TABLE configs ADD COLUMN manual INTEGER NOT NULL DEFAULT 1")
         if "gemini_status" not in columns:

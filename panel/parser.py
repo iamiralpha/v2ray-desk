@@ -190,7 +190,9 @@ def parse_uri(raw):
             name = name[:200]
         outbound["tag"] = "proxy"
         digest = hashlib.sha256(json.dumps(outbound, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        stream_settings = outbound.get("streamSettings", {})
         return {"uri": raw, "name": name, "protocol": scheme, "host": host, "port": port,
+                "transport": stream_settings.get("network", "tcp"), "security": stream_settings.get("security", "none"),
                 "fingerprint": digest, "outbound": outbound}
     except ConfigError:
         raise

@@ -1,13 +1,15 @@
 import copy
+from collections import deque
 import ipaddress
 import json
 import shutil
 import socket
-import statistics
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,12 +19,66 @@ import requests
 
 from .parser import ConfigError, parse_uri
 from .store import connect
+from .delay import measure_delay
 
 TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 GEMINI_URL = "https://gemini.google.com/app"
+DELAY_TARGETS = {
+    "cloudflare": "https://cp.cloudflare.com/generate_204",
+    "google": "https://www.google.com/generate_204",
+    "gstatic": "https://www.gstatic.com/generate_204",
+}
+DEFAULT_OPTIONS = {"workers": 8, "timeout": 5, "samples": 2, "target": "google",
+                   "gemini": True, "country": True}
 
 
-def probe_gemini(port, timeout):
+def test_options(options=None):
+    supplied = {} if options is None else options
+    if not isinstance(supplied, dict) or set(supplied) - set(DEFAULT_OPTIONS):
+        raise ConfigError("Invalid test options.")
+    values = {**DEFAULT_OPTIONS, **supplied}
+    for key, lower, upper in [("workers", 1, 32), ("timeout", 2, 20), ("samples", 1, 3)]:
+        if type(values[key]) is not int or not lower <= values[key] <= upper:
+            raise ConfigError("Invalid test options.")
+    if values["samples"] != 2 or not isinstance(values["target"], str) or values["target"] not in DELAY_TARGETS:
+        raise ConfigError("Invalid test options.")
+    if any(type(values[k]) is not bool for k in ("gemini", "country")):
+        raise ConfigError("Invalid test options.")
+    return values
+
+
+def proxy_session(port):
+    client = requests.Session()
+    client.trust_env = False
+    client.proxies = {"http": f"socks5h://127.0.0.1:{port}",
+                      "https": f"socks5h://127.0.0.1:{port}"}
+    return client
+
+
+def lookup_country(port, timeout):
+    try:
+        with proxy_session(port) as client:
+            started = time.monotonic()
+            with client.get(TRACE_URL, timeout=(timeout, timeout), stream=True,
+                            allow_redirects=False) as response:
+                if response.status_code != 200:
+                    return None, None
+                content = bytearray()
+                for chunk in response.iter_content(1024):
+                    content.extend(chunk)
+                    if len(content) > 16384 or time.monotonic() - started > timeout * 2:
+                        return None, None
+            trace = dict(line.split("=", 1) for line in content.decode("utf-8").splitlines() if "=" in line)
+            address = ipaddress.ip_address(trace.get("ip", ""))
+            if not address.is_global:
+                return None, None
+            country = trace.get("loc", "").upper()
+            return country if len(country) == 2 and country.isascii() and country.isalpha() else None, str(address)
+    except (requests.RequestException, ValueError, UnicodeError):
+        return None, None
+
+
+def probe_gemini(port, timeout, stop=None):
     """HTTP accessibility only; never claim an account can use Gemini."""
     try:
         with requests.Session() as client:
@@ -30,8 +86,12 @@ def probe_gemini(port, timeout):
             client.proxies = {"http": f"socks5h://127.0.0.1:{port}",
                               "https": f"socks5h://127.0.0.1:{port}"}
             target = GEMINI_URL
+            deadline = time.monotonic() + timeout * 2
             for _ in range(6):
-                with client.get(target, timeout=(timeout, timeout), stream=True, allow_redirects=False) as response:
+                remaining = min(timeout, deadline - time.monotonic())
+                if remaining <= 0 or (stop and stop.is_set()):
+                    return "unreachable", None
+                with client.get(target, timeout=(remaining, remaining), stream=True, allow_redirects=False) as response:
                     code = response.status_code
                     if code in {301, 302, 303, 307, 308}:
                         target = urljoin(target, response.headers.get("Location", ""))
@@ -86,13 +146,90 @@ def make_config(parsed, address, socks_port):
     }
 
 
+def make_batch_config(prepared):
+    config = {"log": {"loglevel": "none"}, "inbounds": [],
+              "outbounds": [{"tag": "reject", "protocol": "blackhole"}],
+              "routing": {"rules": []}}
+    for item in prepared:
+        single = make_config(item["parsed"], item["address"], item["port"])
+        inbound, outbound = single["inbounds"][0], single["outbounds"][0]
+        inbound["tag"], outbound["tag"] = f'in-{item["id"]}', f'out-{item["id"]}'
+        config["inbounds"].append(inbound)
+        config["outbounds"].append(outbound)
+        config["routing"]["rules"].append({"type": "field", "inboundTag": [inbound["tag"]],
+                                          "outboundTag": outbound["tag"]})
+    return config
+
+
+@contextmanager
+def shared_core(prepared, executable, stop):
+    process, reservations = None, []
+    kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    with tempfile.TemporaryDirectory(prefix="v2ray-desk-batch-") as folder:
+        try:
+            for item in prepared:
+                sock = socket.socket()
+                reservations.append(sock)
+                sock.bind(("127.0.0.1", 0))
+                item["port"] = sock.getsockname()[1]
+            path = Path(folder) / "config.json"
+            path.write_text(json.dumps(make_batch_config(prepared)), encoding="utf-8")
+            path.chmod(0o600)
+            check = subprocess.run([executable, "run", "-test", "-c", str(path)], timeout=12, **kwargs)
+            if check.returncode:
+                raise ConfigError("The batch test core could not start.")
+            for sock in reservations:
+                sock.close()
+            process = subprocess.Popen([executable, "run", "-c", str(path)], **kwargs)
+            # v2rayN also waits one second before issuing the probes.
+            stop.wait(1)
+            if process.poll() is not None:
+                raise ConfigError("The batch test core could not start.")
+            yield {item["id"]: item["port"] for item in prepared}
+        finally:
+            for sock in reservations:
+                sock.close()
+            if process and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+
+
 def result(status, error=None, **values):
     return {"status": status, "error": error, "latency_ms": None, "country": None,
             "exit_ip": None, "checked_at": utc_now(), "successes": 0, "samples": 0,
-            "gemini_status": "untested", "gemini_code": None, **values}
+            "gemini_status": "untested", "gemini_code": None,
+            "delay_version": 3, "delay_target": None, "delay_samples": "[]", "delay_codes": "[]", **values}
 
 
-def probe(uri, executable, stop, timeout=10, samples=3):
+def probe_connection(port, stop, timeout=5, samples=2, target="google", gemini=True, country=True):
+    latencies, codes, latency = [], [], None
+    try:
+        latency, latencies, codes = measure_delay(port, DELAY_TARGETS[target], timeout, stop)
+    except Exception:
+        pass
+    if stop.is_set():
+        return result("error", "تست متوقف شد.")
+    country_code, exit_ip = lookup_country(port, timeout) if country and latency else (None, None)
+    if stop.is_set():
+        return result("error", "تست متوقف شد.")
+    gemini_status, gemini_code = probe_gemini(port, timeout, stop) if gemini else ("untested", None)
+    if stop.is_set():
+        return result("error", "تست متوقف شد.")
+    metadata = {"gemini_status": gemini_status, "gemini_code": gemini_code,
+                "delay_target": target, "delay_samples": json.dumps(latencies), "delay_codes": json.dumps(codes)}
+    if latency is None:
+        return result("failed", "The two-request delay test failed or timed out.", samples=2, **metadata)
+    return result("healthy", latency_ms=latency, country=country_code, exit_ip=exit_ip,
+                  successes=2, samples=2, **metadata)
+
+
+def probe(uri, executable, stop, timeout=5, samples=2, target="google", gemini=True, country=True):
     if stop.is_set():
         return result("error", "تست متوقف شد.")
     try:
@@ -130,48 +267,8 @@ def probe(uri, executable, stop, timeout=10, samples=3):
                     stop.wait(.05)
             if not ready:
                 return result("error", "هستهٔ تست آماده نشد یا تست متوقف شد.")
-            latencies, countries, ips = [], [], []
-            for _ in range(samples):
-                if stop.is_set():
-                    return result("error", "تست متوقف شد.")
-                try:
-                    with requests.Session() as client:
-                        client.trust_env = False
-                        client.proxies = {"http": f"socks5h://127.0.0.1:{port}",
-                                          "https": f"socks5h://127.0.0.1:{port}"}
-                        started = time.perf_counter()
-                        with client.get(TRACE_URL, timeout=(timeout, timeout), allow_redirects=False,
-                                        stream=True) as response:
-                            if response.status_code != 200:
-                                continue
-                            content = bytearray()
-                            for chunk in response.iter_content(1024):
-                                content.extend(chunk)
-                                if len(content) > 16384 or time.perf_counter() - started > timeout * 2:
-                                    raise requests.RequestException()
-                            elapsed = (time.perf_counter() - started) * 1000
-                        trace = dict(line.split("=", 1) for line in content.decode("utf-8").splitlines() if "=" in line)
-                        exit_ip = str(ipaddress.ip_address(trace.get("ip", "")))
-                        if not ipaddress.ip_address(exit_ip).is_global:
-                            continue
-                        country = trace.get("loc", "")
-                        if len(country) != 2 or not country.isalpha():
-                            country = None
-                        latencies.append(elapsed)
-                        countries.append(country)
-                        ips.append(exit_ip)
-                except (requests.RequestException, ValueError, UnicodeError):
-                    continue
-            if stop.is_set():
-                return result("error", "تست متوقف شد.")
-            gemini_status, gemini_code = probe_gemini(port, timeout)
-            gemini = {"gemini_status": gemini_status, "gemini_code": gemini_code}
-            if not latencies:
-                return result("failed", "پاسخ معتبر از مقصد تست دریافت نشد؛ اتصال یا دسترسی به Cloudflare را بررسی کنید.",
-                              samples=samples, **gemini)
-            country = countries[-1] if len(set(countries)) == 1 else None
-            return result("healthy", latency_ms=round(statistics.median(latencies), 1),
-                          country=country, exit_ip=ips[-1], successes=len(latencies), samples=samples, **gemini)
+            stop.wait(1)
+            return probe_connection(port, stop, timeout, samples, target, gemini, country)
         except (OSError, subprocess.TimeoutExpired):
             return result("error", "خطا در اجرای هستهٔ تست؛ وضعیت نصب Xray را بررسی کنید.")
         finally:
@@ -185,21 +282,59 @@ def probe(uri, executable, stop, timeout=10, samples=3):
 
 
 class TestManager:
-    def __init__(self, db_path, executable="xray", workers=3, probe_function=probe):
+    def __init__(self, db_path, executable="xray", workers=8, probe_function=probe):
         self.db_path, self.executable = db_path, executable
         self.workers, self.probe_function = workers, probe_function
         self.lock = threading.RLock()
         self.stop = threading.Event()
-        self.state = {"running": False, "total": 0, "done": 0, "cancelled": False}
+        self.state = {"running": False, "total": 0, "done": 0, "active": 0, "cancelled": False,
+                      "workers": workers, "options": {**DEFAULT_OPTIONS, "workers": workers}}
+        self.started = None
+        self.ended = None
+        self.epoch = uuid.uuid4().hex
+        self.sequence = 0
+        self.changes = deque(maxlen=20000)
         with connect(db_path) as db:
             db.execute("UPDATE configs SET status='error', error=? WHERE status='testing'",
                        ("تست با راه‌اندازی مجدد سرویس قطع شد؛ دوباره تست کنید.",))
 
     def snapshot(self):
         with self.lock:
-            return dict(self.state)
+            elapsed = ((self.ended or time.monotonic()) - self.started) if self.started else 0
+            done = self.state["done"]
+            rate = done / elapsed if elapsed else 0
+            waiting = max(0, self.state["total"] - done - self.state["active"])
+            return {**self.state, "elapsed": round(elapsed, 1), "rate": round(rate, 2),
+                    "queued": waiting,
+                    "eta": round((self.state["total"] - done) / rate) if rate and self.state["running"] else None}
 
-    def start(self, ids):
+    def invalidate(self):
+        with self.lock:
+            self.epoch = uuid.uuid4().hex
+            self.sequence = 0
+            self.changes.clear()
+
+    def changed(self, config_id):
+        with self.lock:
+            self.sequence += 1
+            self.changes.append((self.sequence, config_id))
+
+    def delta(self, cursor):
+        with self.lock:
+            current = f"{self.epoch}:{self.sequence}"
+            try:
+                epoch, sequence = cursor.split(":")
+                sequence = int(sequence)
+                if epoch != self.epoch or not 0 <= sequence <= self.sequence:
+                    raise ValueError()
+                if self.changes and sequence < self.changes[0][0] - 1:
+                    raise ValueError()
+                return current, {i for s, i in self.changes if s > sequence}
+            except (ValueError, AttributeError):
+                return current, None
+
+    def start(self, ids, options=None):
+        options = test_options(options if options is not None else {"workers": self.workers})
         with self.lock:
             if self.state["running"]:
                 raise ValueError("یک تست در حال اجراست.")
@@ -211,35 +346,104 @@ class TestManager:
             if not rows:
                 raise ValueError("کانفیگی برای تست انتخاب نشده است.")
             self.stop.clear()
-            self.state = {"running": True, "total": len(rows), "done": 0, "cancelled": False}
-            threading.Thread(target=self._run, args=(rows,), daemon=True).start()
+            self.started, self.ended = time.monotonic(), None
+            self.state = {"running": True, "total": len(rows), "done": 0, "active": 0, "cancelled": False,
+                          "workers": min(options["workers"], len(rows)), "options": options}
+            threading.Thread(target=self._run, args=(rows, options), daemon=True).start()
 
     def cancel(self):
         with self.lock:
             self.stop.set()
             self.state["cancelled"] = True
 
-    def _one(self, row):
+    def _one(self, row, options, ports=None):
         if self.stop.is_set():
             return
         try:
             with connect(self.db_path) as db:
                 db.execute("UPDATE configs SET status='testing' WHERE id=?", (row["id"],))
-            outcome = self.probe_function(row["uri"], self.executable, self.stop)
+            self.changed(row["id"])
+            arguments = {k: v for k, v in options.items() if k != "workers"}
+            if ports is None:
+                outcome = self.probe_function(row["uri"], self.executable, self.stop, **arguments)
+            else:
+                outcome = probe_connection(ports[row["id"]], self.stop, **arguments)
         except Exception:
             outcome = result("error", "خطای داخلی هنگام تست؛ دوباره تلاش کنید.")
+        self._save(row, outcome)
+
+    def _save(self, row, outcome):
         keys = ["status", "error", "latency_ms", "country", "exit_ip", "checked_at", "successes", "samples",
-                "gemini_status", "gemini_code"]
+                "gemini_status", "gemini_code", "delay_version", "delay_target", "delay_samples", "delay_codes"]
         with connect(self.db_path) as db:
             db.execute("UPDATE configs SET " + ",".join(key + "=?" for key in keys) + " WHERE id=?",
                        [outcome[key] for key in keys] + [row["id"]])
         with self.lock:
             self.state["done"] += 1
+            self.changed(row["id"])
 
-    def _run(self, rows):
+    def _drain(self, rows, options, ports=None):
+        # Only worker-count futures exist, even with 10,000 configurations.
+        queue = deque(rows)
+        def worker():
+            while True:
+                with self.lock:
+                    if self.stop.is_set() or not queue:
+                        return
+                    row = queue.popleft()
+                    self.state["active"] += 1
+                try:
+                    self._one(row, options, ports)
+                finally:
+                    with self.lock:
+                        self.state["active"] -= 1
+        with ThreadPoolExecutor(max_workers=self.state["workers"]) as pool:
+            futures = [pool.submit(worker) for _ in range(self.state["workers"])]
+            for future in futures:
+                future.result()
+
+    def _batch(self, prepared, options):
+        if not prepared or self.stop.is_set():
+            return
         try:
-            with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                list(pool.map(self._one, rows))
+            with shared_core(prepared, self.executable, self.stop) as ports:
+                with self.lock:
+                    self.state["phase"] = "testing"
+                self._drain(prepared, options, ports)
+        except (ConfigError, OSError, subprocess.TimeoutExpired):
+            # Isolate invalid engine settings rather than failing every node.
+            if len(prepared) > 1:
+                middle = len(prepared) // 2
+                self._batch(prepared[:middle], options)
+                self._batch(prepared[middle:], options)
+            elif not self.stop.is_set():
+                self._save(prepared[0], result("error", "The batch test core could not start."))
+
+    def _run(self, rows, options):
+        try:
+            if self.probe_function is not probe:
+                self._drain(rows, options)
+                return
+            batch_size = min(128, options["workers"] * 4)
+            for offset in range(0, len(rows), batch_size):
+                if self.stop.is_set():
+                    break
+                with self.lock:
+                    self.state["phase"] = "preparing"
+                def prepare(row):
+                    if self.stop.is_set():
+                        return None
+                    try:
+                        parsed = parse_uri(row["uri"])
+                        return {**row, "parsed": parsed, "address": public_address(parsed["host"], parsed["port"])}
+                    except ConfigError as exc:
+                        self._save(row, result("error", str(exc)))
+                        return None
+                with ThreadPoolExecutor(max_workers=options["workers"]) as pool:
+                    prepared = [item for item in pool.map(prepare, rows[offset:offset + batch_size]) if item]
+                self._batch(prepared, options)
         finally:
             with self.lock:
                 self.state["running"] = False
+                self.state["phase"] = "idle"
+                self.ended = time.monotonic()

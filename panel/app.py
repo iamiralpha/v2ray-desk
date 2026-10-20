@@ -167,12 +167,19 @@ def create_app(data_dir=None, test_config=None):
 
     @app.get("/api/configs")
     def configs():
-        with connect(db_path) as db:
-            # Secrets are fetched only when an individual edit or export is requested.
-            rows = db.execute("""SELECT id,name,protocol,host,port,status,latency_ms,country,
-                              exit_ip,checked_at,error,successes,samples,gemini_status,gemini_code
-                              FROM configs ORDER BY id DESC""").fetchall()
-        return jsonify(configs=[dict(row) for row in rows], job=manager.snapshot())
+        with manager.lock:
+            cursor, changed = manager.delta(request.args.get("cursor"))
+            query = """SELECT id,name,protocol,host,port,status,latency_ms,country,
+                       exit_ip,checked_at,error,successes,samples,gemini_status,gemini_code,
+                       delay_version,delay_target,delay_samples,delay_codes,transport,security FROM configs"""
+            params = []
+            if changed is not None:
+                params = list(changed)
+                query += " WHERE id IN (" + ",".join("?" for _ in params) + ")" if params else " WHERE 0"
+            with connect(db_path) as db:
+                rows = db.execute(query + " ORDER BY id DESC", params).fetchall()
+            return jsonify(configs=[dict(row) for row in rows], job=manager.snapshot(),
+                           cursor=cursor, full=changed is None)
 
     @app.get("/api/configs/<int:config_id>")
     def get_config(config_id):
@@ -203,12 +210,13 @@ def create_app(data_dir=None, test_config=None):
                             continue
                         if existing + added >= 10000:
                             raise ConfigError("سقف ذخیرهٔ ۱۰۰۰۰ کانفیگ پر شده است.")
-                        db.execute("""INSERT INTO configs(uri,name,protocol,host,port,fingerprint)
-                                      VALUES (?,?,?,?,?,?)""",
-                                   [parsed[key] for key in ("uri", "name", "protocol", "host", "port", "fingerprint")])
+                        db.execute("""INSERT INTO configs(uri,name,protocol,host,port,fingerprint,transport,security)
+                                      VALUES (?,?,?,?,?,?,?,?)""",
+                                   [parsed[key] for key in ("uri", "name", "protocol", "host", "port", "fingerprint", "transport", "security")])
                         added += 1
                     except ConfigError as exc:
                         errors.append({"line": line_number, "error": str(exc)})
+            manager.invalidate()
         return jsonify(added=added, duplicates=duplicates, errors=errors)
 
     @app.put("/api/configs/<int:config_id>")
@@ -227,12 +235,15 @@ def create_app(data_dir=None, test_config=None):
                 try:
                     cursor = db.execute("""UPDATE configs SET uri=?,name=?,protocol=?,host=?,port=?,fingerprint=?,
                         status='pending',latency_ms=NULL,country=NULL,exit_ip=NULL,checked_at=NULL,error=NULL,
-                        successes=0,samples=0,gemini_status='untested',gemini_code=NULL,manual=1 WHERE id=?""",
-                        (parsed["uri"], name, parsed["protocol"], parsed["host"], parsed["port"], parsed["fingerprint"], config_id))
+                        successes=0,samples=0,gemini_status='untested',gemini_code=NULL,manual=1,
+                        delay_version=3,delay_target=NULL,delay_samples='[]',delay_codes='[]',transport=?,security=? WHERE id=?""",
+                        (parsed["uri"], name, parsed["protocol"], parsed["host"], parsed["port"], parsed["fingerprint"],
+                         parsed["transport"], parsed["security"], config_id))
                 except sqlite3.IntegrityError:
                     raise ConfigError("این کانفیگ قبلاً در فهرست وجود دارد.") from None
                 if cursor.rowcount == 0:
                     return jsonify(error="کانفیگ پیدا نشد."), 404
+            manager.invalidate()
         return jsonify(ok=True)
 
     @app.post("/api/delete")
@@ -248,6 +259,7 @@ def create_app(data_dir=None, test_config=None):
                 if failed_only:
                     query += " AND status='failed'"
                 deleted = db.execute(query, ids).rowcount
+            manager.invalidate()
         return jsonify(deleted=deleted)
 
     @app.post("/api/export")
@@ -269,9 +281,12 @@ def create_app(data_dir=None, test_config=None):
             return launch_tests()
 
     def launch_tests():
-        ids = selected_ids(payload())
+        data = payload()
+        ids = selected_ids(data)
         try:
-            manager.start(ids)
+            manager.start(ids, data.get("options"))
+        except ConfigError:
+            raise
         except FileNotFoundError as exc:
             return jsonify(error=str(exc)), 503
         except ValueError as exc:
@@ -338,6 +353,7 @@ def create_app(data_dir=None, test_config=None):
                 else:
                     db.executemany("UPDATE configs SET manual=1 WHERE id=?", [(i,) for i in ids])
                     removed = 0
+            manager.invalidate()
         return jsonify(removed=removed)
 
     @app.post("/api/subscriptions/<int:sub_id>/refresh")
@@ -357,6 +373,7 @@ def create_app(data_dir=None, test_config=None):
             with manager.lock:
                 with connect(db_path) as db:
                     result = reconcile(db, sub_id, text)
+                manager.invalidate()
             return jsonify(result)
         except ConfigError as exc:
             with connect(db_path) as db:

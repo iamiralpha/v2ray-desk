@@ -65,6 +65,9 @@ MESSAGES = {
 
 
 SUBS_FA = {
+    "Invalid test options.": "تنظیمات تست معتبر نیست؛ هم‌زمانی ۱ تا ۳۲، مهلت ۲ تا ۲۰ ثانیه و دقیقاً دو درخواست مجاز است.",
+    "The two-request delay test failed or timed out.": "تست تأخیر دو درخواست کامل نشد یا مهلت آن تمام شد.",
+    "The batch test core could not start.": "هستهٔ تست گروهی اجرا نشد؛ تنظیمات کانفیگ یا نصب هسته را بررسی کنید.",
     "Subscription URL is invalid.": "لینک ساب معتبر نیست.",
     "Subscription redirect limit reached.": "تعداد تغییر مسیرهای ساب بیش از حد مجاز است.",
     "Subscription HTTPS downgrade was blocked.": "انتقال ساب از HTTPS به HTTP مجاز نیست.",

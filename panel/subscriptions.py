@@ -105,8 +105,8 @@ def reconcile(db, subscription_id, text):
             if count + added >= 10000:
                 raise ConfigError("Configuration limit (10,000) reached.")
             config_id = db.execute(
-                "INSERT INTO configs(uri,name,protocol,host,port,fingerprint,manual) VALUES (?,?,?,?,?,?,0)",
-                [item[k] for k in ("uri", "name", "protocol", "host", "port", "fingerprint")]).lastrowid
+                "INSERT INTO configs(uri,name,protocol,host,port,fingerprint,transport,security,manual) VALUES (?,?,?,?,?,?,?,?,0)",
+                [item[k] for k in ("uri", "name", "protocol", "host", "port", "fingerprint", "transport", "security")]).lastrowid
             added += 1
         current.add(config_id)
     db.execute("DELETE FROM subscription_configs WHERE subscription_id=?", (subscription_id,))
