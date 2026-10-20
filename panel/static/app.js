@@ -12,7 +12,7 @@ let fetching = false, pendingDelete = null, toastTimer;
 let configsCursor = null, filterCache = null, lastSelectedId = null;
 const countryNames = new Map();
 const perPage = 50;
-const statusNames = {pending: L("تست‌نشده", "Not tested"), healthy: L("دارای پاسخ", "Responding"), failed: L("بدون پاسخ", "No response"), error: L("خطای تست", "Test error"), testing: L("در حال تست", "Testing")};
+const statusNames = {pending: L("تست‌نشده", "Not tested"), healthy: L("دارای پاسخ", "Responding"), failed: L("بدون پاسخ", "No response"), error: L("خطای تست", "Test error"), invalid: L("تنظیمات نامعتبر", "Invalid settings"), testing: L("در حال تست", "Testing")};
 const geminiNames = {untested:L("تست‌نشده", "Not tested"),http200:L("پاسخ 200", "HTTP 200"),blocked:L("خطای 403", "HTTP 403"),limited:L("محدودیت 429", "HTTP 429"),login:L("صفحهٔ ورود", "Sign-in page"),redirect:L("انتقال", "Redirect"),unreachable:L("خطای اتصال", "Connection error"),other:L("پاسخ دیگر", "Other response")};
 
 function countryName(code) {
@@ -97,17 +97,26 @@ function scope() {
   const list = filtered();
   return selected.size ? list.filter(row => selected.has(row.id)) : list;
 }
+function testScope() {
+  const mode = $("test-scope").value;
+  return scope().filter(row => mode === "all"
+    || (mode === "pending" && row.status === "pending")
+    || (mode === "failed" && ["failed", "error"].includes(row.status))
+    || (mode === "pending-failed" && ["pending", "failed", "error"].includes(row.status)));
+}
 function syncButtons() {
   const count = filtered().length;
   $("import-open").disabled = running;
   $("empty-import").disabled = running;
   for (const input of document.querySelectorAll(".test-settings select,.test-settings input")) input.disabled = running;
-  $("test-btn").disabled = running || scope().length === 0;
+  const testCount = testScope().length;
+  $("test-btn").disabled = running || testCount === 0;
   $("export-btn").disabled = scope().length === 0;
+  $("report-btn").disabled = scope().length === 0;
   $("delete-selected").disabled = running || selected.size === 0;
   $("delete-failed").disabled = running || !filtered().some(r => r.status === "failed");
   $("select-filtered").disabled = count === 0;
-  $("test-btn").textContent = selected.size ? L(`▷ تست انتخاب‌شده‌ها (${num.format(selected.size)})`, `▷ Test selected (${num.format(selected.size)})`) : L("▷ تست فهرست", "\u25b7 Test results");
+  $("test-btn").textContent = L(`▷ تست (${num.format(testCount)})`, `▷ Test (${num.format(testCount)})`);
   $("export-btn").textContent = selected.size ? L("دریافت انتخاب‌شده‌ها ↓", "Export selected \u2193") : L("دریافت فهرست ↓", "Export results \u2193");
   $("selection-text").textContent = selected.size ? L(`${num.format(selected.size)} کانفیگ انتخاب شده`, `${num.format(selected.size)} configurations selected`) : L("کانفیگی انتخاب نشده", "No configurations selected");
 }
@@ -260,6 +269,7 @@ async function refresh() {
   try {
     const data = await (await api("/api/configs" + (configsCursor ? "?cursor=" + encodeURIComponent(configsCursor) : ""))).json();
     configsCursor = data.cursor;
+    $("engine-version").textContent = data.engine?.version ? `Xray ${data.engine.version}` : L("Xray در دسترس نیست", "Xray unavailable");
     const wasRunning = running;
     if (data.full) records = data.configs;
     else if (data.configs.length) {
@@ -346,7 +356,8 @@ $("select-page").addEventListener("change", () => {
 });
 $("select-filtered").addEventListener("click", () => { selected = new Set(filtered().map(r => r.id)); render(); });
 $("clear-selection").addEventListener("click", () => { selected.clear(); render(); });
-$("test-btn").addEventListener("click", action(() => startTest(scope().map(row => row.id))));
+$("test-scope").addEventListener("change", syncButtons);
+$("test-btn").addEventListener("click", action(() => startTest(testScope().map(row => row.id))));
 $("cancel-test").addEventListener("click", action(async () => { await api("/api/test/cancel", {}); await refresh(); }));
 $("delete-selected").addEventListener("click", () => askDelete([...selected], false));
 $("delete-failed").addEventListener("click", () => askDelete(filtered().filter(row => row.status === "failed").map(row => row.id), true));
@@ -388,6 +399,12 @@ $("export-btn").addEventListener("click", action(async () => {
   const response = await api("/api/export", {ids: scope().map(row => row.id)});
   const url = URL.createObjectURL(await response.blob());
   const anchor = node("a"); anchor.href = url; anchor.download = "v2ray-configs.txt";
+  document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}));
+$("report-btn").addEventListener("click", action(async () => {
+  const response = await api("/api/report", {ids: scope().map(row => row.id)});
+  const url = URL.createObjectURL(await response.blob());
+  const anchor = node("a"); anchor.href = url; anchor.download = "v2ray-report.csv";
   document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }));
 $("logout").addEventListener("click", action(async () => { await api("/api/logout", {}); location.assign(route("/login")); }));

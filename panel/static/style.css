@@ -55,3 +55,5 @@ html[dir=ltr] .collection-heading h2 span{margin-right:0;margin-left:6px}
 .table-scroll .checked-date{font-size:10px}.table-scroll .group-row td{padding:6px 12px;background:#eef2e8}
 .table-footer{padding-block:10px}.legacy-delay{font-size:9px}
 @media(max-width:600px){.test-settings{padding:12px}.test-settings label{font-size:11px}.stats article{padding:12px;min-height:94px}.collection-heading,.filters,.selection-bar{padding-inline:12px}.test-settings .group-toggle{width:auto;margin:0}.page-heading{gap:10px}.table-scroll{max-height:65dvh}}
+
+.status.invalid{color:#7843a1;background:#f3eafa}.actions{flex-wrap:wrap}.collection-heading{gap:16px}.footnote b{font-weight:500;white-space:nowrap}
