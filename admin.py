@@ -143,6 +143,8 @@ def info(config):
     print("Login path:   /" + config["path"] + "/")
     print("Data:         " + DATA)
     print("Languages:    English / Persian")
+    from panel.tester import engine_info
+    print("Xray:         " + (engine_info("/opt/v2ray-desk/bin/xray")["version"] or "unavailable"))
     status = subprocess.run(["systemctl", "is-active", "v2ray-desk"], capture_output=True, text=True)
     print("Service:      " + status.stdout.strip())
     print("Password:     securely hashed; reset it to generate a new one.")

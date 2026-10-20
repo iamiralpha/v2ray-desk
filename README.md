@@ -28,7 +28,7 @@ sudo bash install.sh
 
 Enter the server IP or domain. Choose an automatic or manual password.
 The installer selects a free random HTTPS port and a random 20-character login path,
-and prints the URL and initial password. It installs a dedicated Xray v26.9.9 binary,
+and prints the URL and initial password. It installs a dedicated Xray v26.10.17 binary,
 verifies its SHA-256, and starts the panel under a restricted service account.
 
 To select the port and path during installation:
@@ -87,7 +87,8 @@ two complete GET requests using one reusable HTTP client through the selected pr
 with a 100 ms wait after each request. The lowest positive integer duration is displayed.
 The default target is `https://www.google.com/generate_204`; Gstatic and Cloudflare 204
 endpoints are also available. The default five-second deadline covers both requests and
-waits. A failed or timed-out pair is unsuccessful. Hover over a delay to see both timings
+waits, including stalled TLS handshakes. Cancellation closes the underlying socket instead
+of waiting for a TLS shutdown. A failed or timed-out pair is unsuccessful. Hover over a delay to see both timings
 and HTTP codes. As in v2rayN, any completed HTTP response can be timed, including 403;
 this is a latency measurement, not proof that a particular service is accessible.
 Requests follow at most ten redirects and response bodies are limited to 1 MB.
@@ -175,7 +176,7 @@ production probes use HTTPS.
 The project contains no server credentials, private deployment paths, user configurations, or database files.
 The bundled [Vazirmatn font](https://github.com/rastikerdar/vazirmatn) is OFL licensed;
 see `panel/static/FONT-LICENSE.txt`.
-Xray is downloaded separately from its [official release](https://github.com/XTLS/Xray-core/releases/tag/v26.9.9).
+Xray is downloaded separately from its [official release](https://github.com/XTLS/Xray-core/releases/tag/v26.10.17).
 
 ## Subscription URLs
 
@@ -199,3 +200,13 @@ Click a column header to sort in either direction; unmeasured delays stay at the
 Country grouping is optional. Shift-click checkboxes to select a range; double-click a row
 to edit. Table headers stay visible while scrolling, and smaller displays scroll inside the
 table instead of widening the entire page. All controls are available in English and Persian.
+
+
+## Additional tools (1.2)
+
+- Test scope: all filtered/selected rows, untested rows, unsuccessful rows, or both. Invalid settings are excluded from automatic retries; fix them first, then use a row test or All.
+- CSV reports preserve the visible/selected order and include delay, country, Gemini HTTP and error details. Proxy credentials and full configuration links are excluded; spreadsheet formulas in imported names are escaped.
+- Invalid UUID, REALITY keys/short IDs, Vision combinations and Shadowsocks 2022 keys are rejected with a specific explanation. Saved configurations also pass Xray's `run -test` check. Invalid settings are separate from a timeout or test environment error; one invalid node does not fail the entire batch.
+- The web footer and SSH `info` command show the installed Xray version.
+
+The pinned official Xray **v26.10.17** release is marked **prerelease** by upstream (checked 2026-10-20). The GitHub latest stable endpoint currently points to v26.3.27. This project uses the newest dated official release with pinned SHA-256 checks and integration tests; it does not call it a stable release.
