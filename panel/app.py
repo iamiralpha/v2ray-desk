@@ -1,4 +1,6 @@
+import csv
 import hmac
+import io
 import os
 import secrets
 import sqlite3
@@ -179,7 +181,7 @@ def create_app(data_dir=None, test_config=None):
             with connect(db_path) as db:
                 rows = db.execute(query + " ORDER BY id DESC", params).fetchall()
             return jsonify(configs=[dict(row) for row in rows], job=manager.snapshot(),
-                           cursor=cursor, full=changed is None)
+                           cursor=cursor, full=changed is None, engine=manager.engine)
 
     @app.get("/api/configs/<int:config_id>")
     def get_config(config_id):
@@ -271,6 +273,37 @@ def create_app(data_dir=None, test_config=None):
         response = Response("\n".join(mapping[item] for item in ids if item in mapping) + "\n",
                             content_type="text/plain; charset=utf-8")
         response.headers["Content-Disposition"] = 'attachment; filename="v2ray-configs.txt"'
+        return response
+
+    @app.post("/api/report")
+    def export_report():
+        ids = selected_ids(payload())
+        columns = ["id", "name", "protocol", "host", "port", "transport", "security",
+                   "status", "latency_ms", "country", "exit_ip", "gemini_status",
+                   "gemini_code", "checked_at", "delay_target", "error"]
+        with connect(db_path) as db:
+            rows = db.execute("SELECT " + ",".join(columns) + " FROM configs WHERE id IN ("
+                              + ",".join("?" for _ in ids) + ")", ids)
+            mapping = {row["id"]: dict(row) for row in rows}
+        output = io.StringIO(newline="")
+        output.write("\ufeff")
+        writer = csv.writer(output)
+        writer.writerow(columns)
+        for config_id in ids:
+            if config_id not in mapping:
+                continue
+            values = []
+            for column in columns:
+                value = mapping[config_id][column]
+                if column == "error" and value:
+                    value = translate(value, session.get("lang", "fa"))
+                # Config names are untrusted. Prevent spreadsheet formula execution.
+                if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+                    value = "'" + value
+                values.append(value)
+            writer.writerow(values)
+        response = Response(output.getvalue(), content_type="text/csv; charset=utf-8")
+        response.headers["Content-Disposition"] = 'attachment; filename="v2ray-report.csv"'
         return response
 
     @app.post("/api/test")

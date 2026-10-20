@@ -65,6 +65,20 @@ MESSAGES = {
 
 
 SUBS_FA = {
+    "REALITY public key must be a 32-byte Base64URL key.": "کلید عمومی REALITY باید یک کلید ۳۲ بایتی با قالب Base64URL باشد.",
+    "REALITY short ID must be even-length hexadecimal, up to 16 characters.": "شناسهٔ کوتاه REALITY باید هگزادسیمال با طول زوج و حداکثر ۱۶ نویسه باشد.",
+    "Vision flow requires TLS/REALITY with a compatible TCP or XHTTP transport.": "Flow نوع Vision به TLS یا REALITY و انتقال سازگار TCP یا XHTTP نیاز دارد.",
+    "Shadowsocks 2022 password must contain Base64 keys of the required length.": "رمز Shadowsocks 2022 باید شامل کلیدهای Base64 با طول صحیح باشد.",
+    "Xray rejected the REALITY public key.": "هستهٔ Xray کلید عمومی REALITY را نپذیرفت.",
+    "Xray rejected the REALITY short ID.": "هستهٔ Xray شناسهٔ کوتاه REALITY را نپذیرفت.",
+    "Xray rejected the TLS fingerprint.": "هستهٔ Xray اثر انگشت TLS را نپذیرفت.",
+    "Xray rejected the encryption settings.": "هستهٔ Xray تنظیمات رمزنگاری را نپذیرفت.",
+    "Xray rejected the flow or its transport/security combination.": "هستهٔ Xray تنظیم Flow یا ترکیب آن با انتقال و امنیت را نپذیرفت.",
+    "Xray rejected the proxy password or key format.": "هستهٔ Xray قالب رمز عبور یا کلید پروکسی را نپذیرفت.",
+    "Xray rejected the user ID.": "هستهٔ Xray شناسهٔ کاربر را نپذیرفت.",
+    "Xray rejected the TLS certificate settings.": "هستهٔ Xray تنظیمات گواهی TLS را نپذیرفت.",
+    "Xray rejected the transport settings.": "هستهٔ Xray تنظیمات انتقال را نپذیرفت.",
+    "Xray rejected this configuration. Check the protocol, credentials and transport settings.": "هستهٔ Xray این کانفیگ را نپذیرفت؛ پروتکل، مشخصات ورود و تنظیمات انتقال را بررسی کنید.",
     "Invalid test options.": "تنظیمات تست معتبر نیست؛ هم‌زمانی ۱ تا ۳۲، مهلت ۲ تا ۲۰ ثانیه و دقیقاً دو درخواست مجاز است.",
     "The two-request delay test failed or timed out.": "تست تأخیر دو درخواست کامل نشد یا مهلت آن تمام شد.",
     "The batch test core could not start.": "هستهٔ تست گروهی اجرا نشد؛ تنظیمات کانفیگ یا نصب هسته را بررسی کنید.",

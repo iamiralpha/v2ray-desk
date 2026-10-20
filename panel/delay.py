@@ -3,10 +3,33 @@ import asyncio
 import time
 
 import aiohttp
-from aiohttp_socks import ProxyConnector
+from aiohttp_socks import ProxyConnector as SocksProxyConnector
+from python_socks.async_.asyncio import Proxy as SocketProxy
 
 
-async def _requests(port, url):
+class ProxyConnector(SocksProxyConnector):
+    """Let aiohttp own TLS, so cancelling a stalled handshake closes its socket."""
+
+    async def _connect_via_proxy(self, host, port, ssl=None, timeout=None):
+        # python-socks' stream API waits for StreamWriter.wait_closed() when a
+        # TLS handshake is cancelled. On unresponsive peers that can add 60 s.
+        # Its socket API handles SOCKS only; asyncio owns and cancels TLS here.
+        proxy = SocketProxy(proxy_type=self._proxy_type, host=self._proxy_host,
+                            port=self._proxy_port, username=self._proxy_username,
+                            password=self._proxy_password, rdns=self._rdns)
+        sock = await proxy.connect(dest_host=host, dest_port=port, timeout=timeout)
+        try:
+            return await self._loop.create_connection(
+                self._factory, sock=sock, ssl=ssl,
+                server_hostname=host if ssl else None,
+                ssl_handshake_timeout=timeout if ssl else None,
+            )
+        except BaseException:
+            sock.close()
+            raise
+
+
+async def _requests(port, url, timeout):
     connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{port}", rdns=True)
     timings, codes = [], []
     async with aiohttp.ClientSession(connector=connector, trust_env=False,
@@ -15,7 +38,7 @@ async def _requests(port, url):
         for _ in range(2):
             started = time.perf_counter()
             async with client.get(url, allow_redirects=True, max_redirects=10,
-                                  timeout=aiohttp.ClientTimeout(total=None)) as response:
+                                  timeout=aiohttp.ClientTimeout(total=None, sock_connect=timeout)) as response:
                 size = 0
                 async for chunk in response.content.iter_chunked(8192):
                     size += len(chunk)
@@ -34,7 +57,7 @@ async def _requests(port, url):
 
 async def _cancellable(port, url, timeout, stop):
     # One cancellation budget covers both GETs, full bodies and both waits.
-    task = asyncio.create_task(asyncio.wait_for(_requests(port, url), timeout))
+    task = asyncio.create_task(asyncio.wait_for(_requests(port, url, timeout), timeout))
     try:
         while not task.done():
             if stop.is_set():

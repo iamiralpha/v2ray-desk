@@ -2,6 +2,7 @@ import copy
 from collections import deque
 import ipaddress
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -30,6 +31,45 @@ DELAY_TARGETS = {
 }
 DEFAULT_OPTIONS = {"workers": 8, "timeout": 5, "samples": 2, "target": "google",
                    "gemini": True, "country": True}
+
+
+class InvalidConfigError(ConfigError):
+    pass
+
+
+def engine_validation(executable, path, timeout=12):
+    kwargs = {"capture_output": True, "timeout": timeout}
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    check = subprocess.run([executable, "run", "-test", "-c", str(path)], **kwargs)
+    if not check.returncode:
+        return
+    # Never return raw engine output: it may contain a config's credentials.
+    diagnostic = (check.stdout + check.stderr).decode("utf-8", "replace").lower()
+    for keywords, message in [
+        (("publickey", "public key"), "Xray rejected the REALITY public key."),
+        (("shortid", "short id"), "Xray rejected the REALITY short ID."),
+        (("fingerprint",), "Xray rejected the TLS fingerprint."),
+        (("encryption",), "Xray rejected the encryption settings."),
+        (("flow",), "Xray rejected the flow or its transport/security combination."),
+        (("password", "key length"), "Xray rejected the proxy password or key format."),
+        (("uuid", "invalid user"), "Xray rejected the user ID."),
+        (("certificate",), "Xray rejected the TLS certificate settings."),
+        (("transport", "network"), "Xray rejected the transport settings."),
+    ]:
+        if any(key in diagnostic for key in keywords):
+            raise InvalidConfigError(message)
+    raise InvalidConfigError("Xray rejected this configuration. Check the protocol, credentials and transport settings.")
+
+
+def engine_info(executable):
+    try:
+        run = subprocess.run([executable, "version"], capture_output=True, timeout=3,
+                             **({"creationflags": subprocess.CREATE_NO_WINDOW} if hasattr(subprocess, "CREATE_NO_WINDOW") else {}))
+        match = re.search(r"Xray (\d+\.\d+\.\d+)", run.stdout.decode("utf-8", "replace"))
+        return {"available": run.returncode == 0, "version": match[1] if match else None}
+    except (OSError, subprocess.TimeoutExpired):
+        return {"available": False, "version": None}
 
 
 def test_options(options=None):
@@ -177,9 +217,7 @@ def shared_core(prepared, executable, stop):
             path = Path(folder) / "config.json"
             path.write_text(json.dumps(make_batch_config(prepared)), encoding="utf-8")
             path.chmod(0o600)
-            check = subprocess.run([executable, "run", "-test", "-c", str(path)], timeout=12, **kwargs)
-            if check.returncode:
-                raise ConfigError("The batch test core could not start.")
+            engine_validation(executable, path)
             for sock in reservations:
                 sock.close()
             process = subprocess.Popen([executable, "run", "-c", str(path)], **kwargs)
@@ -234,6 +272,9 @@ def probe(uri, executable, stop, timeout=5, samples=2, target="google", gemini=T
         return result("error", "تست متوقف شد.")
     try:
         parsed = parse_uri(uri)
+    except ConfigError as exc:
+        return result("invalid", str(exc))
+    try:
         address = public_address(parsed["host"], parsed["port"])
     except ConfigError as exc:
         return result("error", str(exc))
@@ -249,10 +290,7 @@ def probe(uri, executable, stop, timeout=5, samples=2, target="google", gemini=T
         if hasattr(subprocess, "CREATE_NO_WINDOW"):
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
-            validation = subprocess.run([executable, "run", "-test", "-c", str(config_path)],
-                                        timeout=8, **kwargs)
-            if validation.returncode:
-                return result("error", "هستهٔ Xray این تنظیمات را نپذیرفت؛ لینک یا نسخهٔ هسته را بررسی کنید.")
+            engine_validation(executable, config_path, timeout=8)
             process = subprocess.Popen([executable, "run", "-c", str(config_path)], **kwargs)
             ready = False
             until = time.monotonic() + 5
@@ -269,6 +307,8 @@ def probe(uri, executable, stop, timeout=5, samples=2, target="google", gemini=T
                 return result("error", "هستهٔ تست آماده نشد یا تست متوقف شد.")
             stop.wait(1)
             return probe_connection(port, stop, timeout, samples, target, gemini, country)
+        except InvalidConfigError as exc:
+            return result("invalid", str(exc))
         except (OSError, subprocess.TimeoutExpired):
             return result("error", "خطا در اجرای هستهٔ تست؛ وضعیت نصب Xray را بررسی کنید.")
         finally:
@@ -285,6 +325,7 @@ class TestManager:
     def __init__(self, db_path, executable="xray", workers=8, probe_function=probe):
         self.db_path, self.executable = db_path, executable
         self.workers, self.probe_function = workers, probe_function
+        self.engine = engine_info(executable)
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.state = {"running": False, "total": 0, "done": 0, "active": 0, "cancelled": False,
@@ -410,14 +451,15 @@ class TestManager:
                 with self.lock:
                     self.state["phase"] = "testing"
                 self._drain(prepared, options, ports)
-        except (ConfigError, OSError, subprocess.TimeoutExpired):
+        except (ConfigError, OSError, subprocess.TimeoutExpired) as exc:
             # Isolate invalid engine settings rather than failing every node.
             if len(prepared) > 1:
                 middle = len(prepared) // 2
                 self._batch(prepared[:middle], options)
                 self._batch(prepared[middle:], options)
             elif not self.stop.is_set():
-                self._save(prepared[0], result("error", "The batch test core could not start."))
+                self._save(prepared[0], result("invalid", str(exc)) if isinstance(exc, InvalidConfigError)
+                           else result("error", "The batch test core could not start."))
 
     def _run(self, rows, options):
         try:
@@ -435,6 +477,10 @@ class TestManager:
                         return None
                     try:
                         parsed = parse_uri(row["uri"])
+                    except ConfigError as exc:
+                        self._save(row, result("invalid", str(exc)))
+                        return None
+                    try:
                         return {**row, "parsed": parsed, "address": public_address(parsed["host"], parsed["port"])}
                     except ConfigError as exc:
                         self._save(row, result("error", str(exc)))

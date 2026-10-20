@@ -65,6 +65,12 @@ def stream(options, host, default_security="none"):
             raise ConfigError("REALITY با این نوع انتقال سازگار نیست.")
         if not options.get("pbk"):
             raise ConfigError("کلید عمومی REALITY (pbk) وارد نشده است.")
+        key = options["pbk"]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}=?", key) or len(base64.urlsafe_b64decode(key + "=" * (-len(key) % 4))) != 32:
+            raise ConfigError("REALITY public key must be a 32-byte Base64URL key.")
+        short_id = options.get("sid", "")
+        if len(short_id) > 16 or len(short_id) % 2 or not re.fullmatch(r"[0-9a-fA-F]*", short_id):
+            raise ConfigError("REALITY short ID must be even-length hexadecimal, up to 16 characters.")
         result["realitySettings"] = {
             "serverName": sni, "fingerprint": options.get("fp") or "chrome",
             "publicKey": options["pbk"], "shortId": options.get("sid", ""),
@@ -166,6 +172,8 @@ def parse_uri(raw):
                     if options.get("flow"):
                         if options["flow"] not in {"xtls-rprx-vision", "xtls-rprx-vision-udp443"}:
                             raise ConfigError("flow پشتیبانی نمی‌شود.")
+                        if transport["security"] not in {"tls", "reality"} or transport["network"] not in {"tcp", "xhttp"}:
+                            raise ConfigError("Vision flow requires TLS/REALITY with a compatible TCP or XHTTP transport.")
                         user["flow"] = options["flow"]
                     settings = {"vnext": [{"address": host, "port": port, "users": [user]}]}
                 else:
@@ -183,6 +191,13 @@ def parse_uri(raw):
                                   "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
                                   "2022-blake3-chacha20-poly1305"}:
                     raise ConfigError("روش رمزنگاری Shadowsocks پشتیبانی نمی‌شود.")
+                if method.startswith("2022-"):
+                    length = 16 if method == "2022-blake3-aes-128-gcm" else 32
+                    try:
+                        if any(len(base64.b64decode(key, validate=True)) != length for key in password.split(":")):
+                            raise ValueError()
+                    except ValueError:
+                        raise ConfigError("Shadowsocks 2022 password must contain Base64 keys of the required length.") from None
                 outbound = {"protocol": "shadowsocks", "settings": {"servers": [{
                     "address": host, "port": port, "method": method, "password": password,
                 }]}}
