@@ -260,7 +260,9 @@ class FakeResponse:
 def test_gemini_classification_and_no_direct_fallback(monkeypatch, code, location, expected):
     def request(port, target, timeout, **kwargs):
         assert port == 12345 and target == "https://gemini.google.com/app"
-        return code, {"Location": location} if location else {}, b""
+        headers = {"Location": location} if location else {}
+        kwargs["redirect"](target, code, headers)
+        return code, headers, b""
     monkeypatch.setattr("panel.tester.proxy_get", request)
     assert probe_gemini(12345, 2) == (expected, code)
 

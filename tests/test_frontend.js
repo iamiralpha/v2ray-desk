@@ -101,6 +101,35 @@ async function loadApp({savedOptions = null, lang = "en"} = {}) {
     setHandler: fn => { handler = fn; }, set: (key, value) => { context[key] = value; }};
 }
 
+test("admin table shows the selected node result alongside the main result", async () => {
+  const app = await loadApp();
+  const config = {...row(1,"DE"),status:"healthy",latency_ms:91,
+    node_results:{"2":{status:"failed",latency_ms:null},"3":{status:"healthy",latency_ms:55}}};
+  const job = {...blankSnapshot,configs:[config],nodes:[{id:2,name:"Iran"},{id:3,name:"Other"}]};
+  app.setHandler(async()=>response(job));
+  await app.run("refresh()");
+  assert.equal(app.get("rows").children[0].children.at(-3).textContent,"No response");
+  app.get("node-select").value="3";
+  app.get("node-select").listeners.change();
+  assert.equal(app.get("rows").children[0].children.at(-3).textContent,"Responding · 55 ms");
+});
+
+test("node enrollment token is displayed once and cleared on close", async () => {
+  const app = await loadApp();
+  app.setHandler(async (url, options) => {
+    if (url.endsWith("/api/nodes") && options.method === "POST") return response({node:{id:1,name:"Iran"},token:"sensitive-token"});
+    if (url.endsWith("/api/nodes")) return response({nodes:[{id:1,name:"Iran",last_seen:null}],certificate_fingerprint:"abc"});
+    return response(blankSnapshot);
+  });
+  await app.get("nodes-open").listeners.click({currentTarget:app.get("nodes-open")});
+  app.get("node-name").value="Iran";
+  await app.get("node-create").listeners.click({currentTarget:app.get("node-create")});
+  assert.equal(app.get("node-token").value,"sensitive-token");
+  assert.equal(app.get("node-token-area").hidden,false);
+  app.get("node-close").listeners.click();
+  assert.equal(app.get("node-token").value,"");
+});
+
 test("deleting the final country record immediately restores a consistent All view", async () => {
   const app = await loadApp();
   app.set("fixtures", [row(1, "DE"), row(2, "US")]);
@@ -285,6 +314,79 @@ test("completed test reports auto-deletion count and removes rows from the view"
   assert.equal(app.get("auto-delete-result").hidden, false);
   assert.match(app.get("auto-delete-result").textContent, /Auto-deleted 1/);
   assert.match(app.get("toast").textContent, /Auto-deleted 1/);
+});
+
+for (const lang of ["en", "fa"]) {
+  test(`two-stage progress follows the active stage and finishes only after metadata (${lang})`, async () => {
+    const app = await loadApp({lang});
+    let job = {...blankSnapshot.job,running:true,phase:"delay",phase_done:3,phase_total:8,
+      done:3,total:8,active:2,queued:3,eta:90,options:{gemini:true,country:true}};
+    app.setHandler(async () => response({...blankSnapshot,configs:[row(1,"DE")],job}));
+    await app.run("refresh()");
+    assert.equal(app.get("job").hidden,false);
+    assert.match(app.get("job-text").textContent,lang === "en" ? /Stage 1 · Real Delay · 3\/8/ : /مرحلهٔ ۱ · تست Real Delay · ۳\/۸/);
+    assert.equal(app.get("job-progress").max,8);
+    assert.equal(app.get("job-progress").value,3);
+    assert.equal(app.get("test-btn").disabled,true);
+    assert.equal(app.get("cancel-test").disabled,false);
+
+    job = {...job,done:8,phase_done:8,active:0,queued:0,eta:0};
+    await app.run("refresh()");
+    assert.equal(app.get("job").hidden,false);
+    assert.equal(app.get("toast").textContent,"");
+    job = {...job,phase:"metadata",phase_done:0,phase_total:3,active:2,queued:1,eta:75};
+    await app.run("refresh()");
+    assert.equal(app.get("job-progress").value,0);
+    assert.equal(app.get("job-progress").max,3);
+    assert.match(app.get("job-text").textContent,lang === "en" ? /Stage 2 · Gemini and country · 0\/3/ : /مرحلهٔ ۲ · جمینای و کشور · ۰\/۳/);
+    assert.match(app.get("job-text").textContent,lang === "en" ? /Real Delay completed: 8\/8/ : /Real Delay تکمیل‌شده: ۸\/۸/);
+    assert.match(app.get("job-text").textContent,lang === "en" ? /about 2 min left in this stage/ : /حدود ۲ دقیقه تا پایان این مرحله/);
+    assert.equal(app.get("job-progress")["aria-valuetext"],app.get("job-text").textContent);
+    assert.equal(app.get("test-btn").disabled,true);
+    assert.equal(app.get("toast").textContent,"");
+
+    job = {...job,phase_done:2,active:1,queued:0};
+    await app.run("refresh()");
+    assert.equal(app.get("job-progress").value,2);
+    job = {...job,running:false,phase:"idle",phase_done:3,active:0,eta:null};
+    await app.run("refresh()");
+    assert.equal(app.get("job").hidden,true);
+    assert.equal(app.get("test-btn").disabled,false);
+    assert.equal(app.get("toast").textContent,lang === "en" ? "Testing complete." : "تست فهرست تمام شد.");
+  });
+}
+
+test("metadata labels follow the job options and stopping keeps the current phase progress", async () => {
+  for (const lang of ["en","fa"]) {
+    const app = await loadApp({lang});
+    let job = {...blankSnapshot.job,running:true,phase:"metadata",phase_done:2,phase_total:5,
+      done:10,total:10,options:{gemini:true,country:false}};
+    app.setHandler(async () => response({...blankSnapshot,job}));
+    await app.run("refresh()");
+    assert.equal(app.get("job-progress")["aria-label"],lang === "en" ? "Stage 2 · Gemini" : "مرحلهٔ ۲ · جمینای");
+    job = {...job,cancelled:true,options:{gemini:false,country:true}};
+    await app.run("refresh()");
+    assert.equal(app.get("job-progress")["aria-label"],lang === "en" ? "Stage 2 · country" : "مرحلهٔ ۲ · کشور");
+    assert.match(app.get("job-text").textContent,lang === "en" ? /^Stopping · Stage 2/ : /^در حال توقف · مرحلهٔ ۲/);
+    assert.equal(app.get("job-progress").max,5);
+    assert.equal(app.get("job-progress").value,2);
+    assert.equal(app.get("job").hidden,false);
+    assert.equal(app.get("cancel-test").disabled,true);
+    assert.equal(app.get("toast").textContent,"");
+    job = {...job,running:false,phase:"idle"};
+    await app.run("refresh()");
+    assert.match(app.get("toast").textContent,lang === "en" ? /^Testing stopped/ : /^تست متوقف شد/);
+  }
+});
+
+test("legacy jobs without phase counters retain their Real Delay progress", async () => {
+  const app = await loadApp();
+  app.setHandler(async () => response({...blankSnapshot,job:{...blankSnapshot.job,running:true,
+    done:4,total:9,active:2,queued:3,eta:90}}));
+  await app.run("refresh()");
+  assert.equal(app.get("job-progress").max,9);
+  assert.equal(app.get("job-progress").value,4);
+  assert.equal(app.get("job-text").textContent,"Testing Real Delay · 4/9 · active: 2 · queued: 3 · about 2 min left");
 });
 
 test("export sends the chosen format and filtered selection in visible order", async () => {

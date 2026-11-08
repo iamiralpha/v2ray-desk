@@ -375,9 +375,10 @@ def test_cursor_invalidation_and_unchanged_list(client):
 
 def test_upgrade_preserves_existing_measurement_and_backfills_transport(tmp_path):
     import sqlite3
+    from contextlib import closing
     from panel.store import initialize
     path = tmp_path / "panel.sqlite3"
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("""CREATE TABLE configs (
             id INTEGER PRIMARY KEY,uri TEXT NOT NULL,name TEXT NOT NULL,protocol TEXT NOT NULL,
             host TEXT NOT NULL,port INTEGER NOT NULL,fingerprint TEXT NOT NULL UNIQUE,

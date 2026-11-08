@@ -62,6 +62,29 @@ async function loadPublic({lang="en",clipboard,base=""}={}) {
     setHandler:fn=>{handler=fn;},flushTimers:()=>{const pending=[...timers.values()];timers.clear();pending.forEach(callback=>callback());}};
 }
 
+test("public visitors can view the selected node result separately from the primary result", async () => {
+  const app=await loadPublic();
+  const first={...row(1),node_results:{"4":{status:"failed",latency_ms:null},"5":{status:"healthy",latency_ms:46}}};
+  const next=snapshot([first],{nodes:[{id:4,name:"Iran"},{id:5,name:"Other"}]});
+  app.setHandler(async()=>response(next));
+  await app.run("load()");
+  let cells=app.get("public-rows").children[0].children;
+  assert.equal(cells[5].textContent,"100 ms");
+  assert.equal(cells[8].textContent,"No response");
+  app.get("public-node").value="5";
+  await app.run("load()");
+  cells=app.get("public-rows").children[0].children;
+  assert.equal(cells[5].textContent,"100 ms");
+  assert.equal(cells[8].textContent,"Responding · 46 ms");
+});
+
+test("a Gemini 403 is shown as an anonymous response", async () => {
+  const app=await loadPublic();
+  app.set("fixture",snapshot([{...row(1),gemini_status:"blocked"}]));
+  app.run("render(fixture)");
+  assert.equal(app.get("public-rows").children[0].children[7].textContent,"Anonymous HTTP 403");
+});
+
 test("a superseded list response cannot replace newer filtered results",async()=>{
   const app=await loadPublic({base:"/desk"});
   let releaseOld,releaseNew;
