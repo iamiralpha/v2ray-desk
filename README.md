@@ -14,6 +14,7 @@ A self-hosted configuration manager for Ubuntu with public browsing, password-pr
 - v2rayN-style Real Delay: two GETs over a reusable connection, minimum latency and 1–128 parallel workers with a shared Xray core.
 - Exit-country detection, selectable country filtering, grouping, search and delay sorting.
 - Gemini HTTP check through the same proxy: 200, 403, 429, sign-in redirect and connection failures.
+- Optional remote test nodes, with separate results for each location and authenticated outbound-only polling.
 - Edit, copy, export and delete configurations, including nonresponding configurations in the current filter.
 - SSH menu for panel details, random/manual port selection, port checks, random/manual login paths, passwords and service control.
 - Random 10- or 20-character paths, a generated password shown once, HTTPS and automatic service startup.
@@ -22,7 +23,13 @@ A self-hosted configuration manager for Ubuntu with public browsing, password-pr
 
 Requires Ubuntu 22.04 or newer, x86_64 or ARM64, root access, and outbound access to Ubuntu packages, PyPI and GitHub.
 
-Download/extract this repository, then run:
+Install the panel with one command (requires `curl`, HTTPS access to GitHub and `sudo`):
+
+```bash
+f="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/iamiralpha/v2ray-desk/main/install-online.sh -o "$f" && sudo bash "$f"
+```
+
+Alternatively, download/extract this repository, then run:
 
 ```bash
 sudo bash install.sh
@@ -30,7 +37,7 @@ sudo bash install.sh
 
 Enter the server IP or domain. Choose an automatic or manual password.
 The installer selects a free random HTTPS port and a random 20-character login path,
-and prints the URL and initial password. It installs a dedicated Xray v26.10.17 binary,
+and prints the URL and initial password. It installs a dedicated Xray v26.10.31 binary,
 verifies its SHA-256, and starts the panel under a restricted service account.
 
 To select the port and path during installation:
@@ -96,7 +103,11 @@ this is a latency measurement, not proof that a particular service is accessible
 Requests follow at most ten redirects and response bodies are limited to 1 MB.
 
 Single and bulk tests use the same timer. Xray startup, country lookup and Gemini checks
-are excluded from the delay. The measurement runs from the Ubuntu server; its route, load,
+are excluded from the delay. Each job finishes Real Delay for every selected configuration
+before starting Gemini and country checks, so metadata requests cannot overlap the job's
+latency measurements. Delay results appear as they finish; the progress bar then shows the
+second stage separately. Stopping during this second stage preserves completed delay results.
+The measurement runs from the Ubuntu server; its route, load,
 HTTP runtime and network differ from v2rayN on a phone or PC, so values need not match.
 Older saved results are marked **Previous measurement** until retested.
 
@@ -117,12 +128,38 @@ Failures can be target-specific, so retest before deleting valuable configuratio
 Gemini is checked separately at `https://gemini.google.com/app` through the same Xray proxy.
 HTTP 403 is reported exactly; it does not determine whether the cause is geography, bot detection
 or another restriction. HTTP 200 means the web endpoint responded; it does not guarantee access
-with a particular Google account or subscription.
+with a particular Google account or subscription. Google sign-in, consent and challenge
+redirects are distinguished from a Gemini HTTP 200 response. Cookies are retained only within
+one proxy's bounded redirect check and are discarded afterward.
+The request uses browser-like HTML headers but is anonymous and runs from the test server.
+An anonymous HTTP 403 can coexist with a working signed-in browser; account access cannot be
+established without that account and is not represented as a confirmed account block.
+
 
 No direct outbound fallback is included in the test configuration.
 Engine failures and unsupported configurations are kept separate from nonresponding connections.
 The bulk-delete action for nonresponding configurations never deletes untested or engine-error rows.
 With country grouping enabled, delay sorting is applied within each group; disable grouping for global sorting.
+
+## Remote test nodes
+
+In the administrator panel, open **Test nodes**, add a name such as `Iran`, and save the
+one-time node token and certificate fingerprint shown there. On the Ubuntu node run:
+
+```bash
+f="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/iamiralpha/v2ray-desk/main/install-online.sh -o "$f" && sudo bash "$f" node
+```
+
+Enter the main panel's full HTTPS URL, the SHA-256 fingerprint displayed in the panel,
+the one-time token, and the desired worker count. The installer verifies the certificate
+fingerprint before sending the token. Nodes initiate outbound connections and need no inbound port.
+They use the same Real Delay method and retrieve only configurations whose latest main-server
+test succeeded. Results and timestamps are separate for each node; the table lets both visitors
+and the administrator select a node. A new main-server test makes old node results unavailable
+until that node retests. Nodes poll automatically; removing a node revokes its token and results.
+Node tokens and configuration links are sensitive: the node configuration is owned by root and readable only by its dedicated service group; its temporary database belongs to the service account. Changing the panel certificate
+requires rerunning the node installer with `NODE_RECONFIGURE=1` and the new verified fingerprint.
+
 
 ## Supported formats and limits
 
@@ -191,7 +228,7 @@ production probes use HTTPS.
 The project contains no server credentials, private deployment paths, user configurations, or database files.
 The bundled [Vazirmatn font](https://github.com/rastikerdar/vazirmatn) is OFL licensed;
 see `panel/static/FONT-LICENSE.txt`.
-Xray is downloaded separately from its [official release](https://github.com/XTLS/Xray-core/releases/tag/v26.10.17).
+Xray is downloaded separately from its [official release](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31).
 
 ## Subscription URLs
 
@@ -270,4 +307,4 @@ table instead of widening the entire page. All controls are available in English
 - If a selected country disappears, the filter, table and selection reset together. Subscription controls stay disabled during an operation and recover after failures.
 - Initialization repairs the private data-directory and SQLite file permissions described above.
 
-The pinned official Xray **v26.10.17** release is marked **prerelease** by upstream (checked 2026-10-20). The GitHub latest stable endpoint currently points to v26.3.27. This project uses the newest dated official release with pinned SHA-256 checks and integration tests; it does not call it a stable release.
+The pinned Xray **v26.10.31** is the official latest stable release checked on 2026-11-09. It includes upstream's MPTCP security mitigation. Binary downloads are verified against pinned SHA-256 values.

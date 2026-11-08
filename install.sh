@@ -99,6 +99,13 @@ except ValueError: print("DNS:"+v)' "$PANEL_ADDRESS")"
     -subj "/CN=$PANEL_ADDRESS" -addext "subjectAltName=$SAN"
   chmod 0600 /etc/v2ray-desk/key.pem
 fi
+python3 - "$APP/cert.sha256" <<'PY'
+import hashlib, pathlib, ssl, sys
+certificate = pathlib.Path('/etc/v2ray-desk/cert.pem').read_text(encoding='ascii')
+path = pathlib.Path(sys.argv[1])
+path.write_text(hashlib.sha256(ssl.PEM_cert_to_DER_cert(certificate)).hexdigest() + '\n', encoding='ascii')
+path.chmod(0o644)
+PY
 cat > /etc/systemd/system/v2ray-desk.service <<EOF
 [Unit]
 Description=V2Ray Desk private configuration panel
