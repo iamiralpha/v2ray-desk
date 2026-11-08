@@ -8,11 +8,11 @@ from pathlib import Path
 import urllib.request
 import zipfile
 
-VERSION = "v26.10.17"
+VERSION = "v26.10.31"
 ASSETS = {
-    "linux-x86_64": ("Xray-linux-64.zip", "ecdd54eccd24c4c21a8f00968e7dbf7f5996da92383d2321170b560dc4a95158"),
-    "linux-aarch64": ("Xray-linux-arm64-v8a.zip", "4ebdad86048fa499e65334f88a120b1ed17e662f1c222afd3514afdf8820cdb1"),
-    "windows-amd64": ("Xray-windows-64.zip", "c10a532a9271964f2aa2f4b4c0757605ff529222cb1d5d7ab88f8ecc52e67fb0"),
+    "linux-x86_64": ("Xray-linux-64.zip", "e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214"),
+    "linux-aarch64": ("Xray-linux-arm64-v8a.zip", "1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d"),
+    "windows-amd64": ("Xray-windows-64.zip", "2e04a9995a6f2ad1b28c0bb25c708ecb2695e43a1c9c7889c4b6ac2b48cf7a6a"),
 }
 
 
