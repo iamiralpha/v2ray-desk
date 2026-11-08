@@ -11,10 +11,31 @@ let records = [], selected = new Set(), activeCountry = "", page = 1, running = 
 let fetching = false, pendingDelete = null, toastTimer;
 let configsCursor = null, filterCache = null, lastSelectedId = null;
 let subscriptions = [], activeSubscription = "", subscriptionSync = {running:false, total:0, done:0};
+let availableNodes = [];
 const countryNames = new Map();
 const perPage = 50;
 const statusNames = {pending: L("تست‌نشده", "Not tested"), healthy: L("دارای پاسخ", "Responding"), failed: L("بدون پاسخ", "No response"), error: L("خطای تست", "Test error"), invalid: L("تنظیمات نامعتبر", "Invalid settings"), testing: L("در حال تست", "Testing")};
-const geminiNames = {untested:L("تست‌نشده", "Not tested"),http200:L("پاسخ 200", "HTTP 200"),blocked:L("خطای 403", "HTTP 403"),limited:L("محدودیت 429", "HTTP 429"),login:L("صفحهٔ ورود", "Sign-in page"),redirect:L("انتقال", "Redirect"),unreachable:L("خطای اتصال", "Connection error"),other:L("پاسخ دیگر", "Other response")};
+const geminiNames = {untested:L("تست‌نشده", "Not tested"),http200:L("پاسخ 200", "HTTP 200"),blocked:L("۴۰۳ ناشناس", "Anonymous HTTP 403"),limited:L("محدودیت 429", "HTTP 429"),login:L("صفحهٔ ورود", "Sign-in page"),redirect:L("انتقال", "Redirect"),unreachable:L("خطای اتصال", "Connection error"),other:L("پاسخ دیگر", "Other response")};
+
+function updateNodes(items) {
+  const next = Array.isArray(items) ? items : [];
+  const changed = JSON.stringify(next) !== JSON.stringify(availableNodes);
+  if (!changed) return false;
+  availableNodes = next;
+  const select = $("node-select"), selected = select.value;
+  select.replaceChildren();
+  for (const entry of availableNodes) {
+    const option = node("option", entry.name); option.value = String(entry.id); select.append(option);
+  }
+  select.hidden = !availableNodes.length;
+  select.value = availableNodes.some(entry => String(entry.id) === selected) ? selected : String(availableNodes[0]?.id || "");
+  return true;
+}
+function nodeResult(item) {
+  const value = item.node_results?.[$("node-select").value];
+  if (!value) return item.status === "healthy" && availableNodes.length ? L("در انتظار تست", "Awaiting test") : "—";
+  return (statusNames[value.status] || value.status) + (value.status === "healthy" && value.latency_ms != null ? ` · ${num.format(Math.round(value.latency_ms))} ms` : "");
+}
 
 function countryName(code) {
   if (!code) return L("نامشخص", "Unknown");
@@ -294,8 +315,12 @@ function render() {
     tr.append(status);
     const geminiCell = node("td");
     const geminiBadge = node("span", geminiNames[item.gemini_status] || L("تست‌نشده", "Not tested"), "status " + ({http200:"healthy",blocked:"failed",limited:"error",login:"pending",unreachable:"error"}[item.gemini_status] || "pending"));
-    geminiBadge.title = item.gemini_code ? L(`HTTP ${item.gemini_code}؛ پاسخ وب، بدون ورود به حساب گوگل`, `HTTP ${item.gemini_code}; web response without a Google account`) : L("تست درخواست HTTPS به gemini.google.com/app از داخل همین پروکسی", "HTTPS request to gemini.google.com/app through this proxy");
+    geminiBadge.title = item.gemini_code ? L(`HTTP ${item.gemini_code}؛ درخواست بدون ورود به گوگل است و وضعیت حساب شما را مشخص نمی‌کند.`, `HTTP ${item.gemini_code}; this anonymous request cannot determine your account access.`) : L("تست درخواست HTTPS به gemini.google.com/app از داخل همین پروکسی", "HTTPS request to gemini.google.com/app through this proxy");
     geminiCell.append(geminiBadge); tr.append(geminiCell);
+    const remote = node("td", nodeResult(item));
+    const remoteData = item.node_results?.[$("node-select").value];
+    if (remoteData?.checked_at) remote.title = new Date(remoteData.checked_at).toLocaleString(EN ? "en-US" : "fa-IR");
+    tr.append(remote);
     const checked = node("td", item.checked_at ? new Intl.DateTimeFormat(EN ? "en-US" : "fa-IR", {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}).format(new Date(item.checked_at)) : L("هنوز تست نشده", "Not tested yet"), "checked-date");
     tr.append(checked);
     const ops = node("td", undefined, "row-actions");
@@ -328,6 +353,29 @@ function render() {
   }
   syncButtons();
 }
+function renderJobProgress(job) {
+  const metadata = job.phase === "metadata", phased = metadata || job.phase === "delay";
+  let stage = L("در حال تست Real Delay", "Testing Real Delay");
+  if (job.phase === "delay") stage = L("مرحلهٔ ۱ · تست Real Delay", "Stage 1 · Real Delay");
+  if (metadata) {
+    const checks = [];
+    if (job.options?.gemini) checks.push(L("جمینای", "Gemini"));
+    if (job.options?.country) checks.push(L("کشور", "country"));
+    stage = L("مرحلهٔ ۲ · ", "Stage 2 · ") + (checks.join(L(" و ", " and ")) || L("بررسی‌های تکمیلی", "Additional checks"));
+  }
+  const done = job.phase_done ?? job.done, total = job.phase_total ?? job.total;
+  const delayCompleted = metadata ? L(` · Real Delay تکمیل‌شده: ${num.format(job.done)}/${num.format(job.total)}`, ` · Real Delay completed: ${num.format(job.done)}/${num.format(job.total)}`) : "";
+  const minutes = num.format(Math.ceil(job.eta / 60));
+  const eta = job.eta == null ? "" : phased
+    ? L(` · حدود ${minutes} دقیقه تا پایان این مرحله`, ` · about ${minutes} min left in this stage`)
+    : L(` · حدود ${minutes} دقیقه باقی‌مانده`, ` · about ${minutes} min left`);
+  const text = `${job.cancelled ? L("در حال توقف · ", "Stopping · ") : ""}${stage} · ${num.format(done)}/${num.format(total)}${delayCompleted} · ${L("هم‌زمان", "active")}: ${num.format(job.active)} · ${L("در صف", "queued")}: ${num.format(job.queued)}${eta}`;
+  $("job-text").textContent = text;
+  $("job-progress").max = Math.max(1, total); $("job-progress").value = done;
+  $("job-progress").setAttribute("aria-label", stage);
+  $("job-progress").setAttribute("aria-valuetext", text);
+  $("cancel-test").disabled = job.cancelled;
+}
 async function refresh() {
   if (fetching) return;
   fetching = true;
@@ -338,6 +386,7 @@ async function refresh() {
     const wasRunning = running;
     const wasSyncing = subscriptionSync.running;
     const subscriptionsChanged = updateSubscriptions(data.subscriptions);
+    const nodesChanged = updateNodes(data.nodes);
     updateSubscriptionProgress(data.subscription_sync);
     if (data.full) records = data.configs;
     else if (data.configs.length) {
@@ -350,16 +399,44 @@ async function refresh() {
     const deletedText = L(`${num.format(autoDeleted)} کانفیگ پس از دو شکست اتصال پیاپی خودکار حذف شد.`, `Auto-deleted ${num.format(autoDeleted)} configurations after two consecutive connection failures.`);
     $("auto-delete-result").hidden = !autoDeleted;
     $("auto-delete-result").textContent = deletedText;
-    const eta = data.job.eta === null ? "" : L(` · حدود ${num.format(Math.ceil(data.job.eta / 60))} دقیقه باقی‌مانده`, ` · about ${num.format(Math.ceil(data.job.eta / 60))} min left`);
-    $("job-text").textContent = `${data.job.cancelled ? L("در حال توقف", "Stopping") : L("در حال تست Real Delay", "Testing Real Delay")} · ${num.format(data.job.done)}/${num.format(data.job.total)} · ${L("هم‌زمان", "active")}: ${num.format(data.job.active)} · ${L("در صف", "queued")}: ${num.format(data.job.queued)}${eta}`;
-    $("job-progress").max = Math.max(1, data.job.total); $("job-progress").value = data.job.done;
-    $("cancel-test").disabled = data.job.cancelled;
+    renderJobProgress(data.job);
     if (wasRunning && !running) toast(data.job.cancelled ? L("تست متوقف شد؛ موارد تست‌نشده تغییر نکردند.", "Testing stopped. Queued configurations were left unchanged.") : L("تست فهرست تمام شد.", "Testing complete.") + (autoDeleted ? " " + deletedText : ""));
-    if (data.full || data.configs.length || subscriptionsChanged || wasRunning !== running || wasSyncing !== subscriptionSync.running) { filterCache = null; render(); }
+    if (data.full || data.configs.length || subscriptionsChanged || nodesChanged || wasRunning !== running || wasSyncing !== subscriptionSync.running) { filterCache = null; render(); }
     else syncButtons();
     if (subsDialog.open && !subWorking) await loadSubscriptions();
   } finally { fetching = false; }
 }
+$("node-select").addEventListener("change", () => render());
+const nodeDialog = $("node-dialog");
+async function loadNodes() {
+  const data = await (await api("/api/nodes")).json();
+  updateNodes(data.nodes);
+  $("node-fingerprint").textContent = data.certificate_fingerprint || L("در SSH اثر انگشت گواهی را از دستور زیر بگیرید: openssl x509 -in /etc/v2ray-desk/cert.pem -noout -fingerprint -sha256", "In SSH obtain the fingerprint with: openssl x509 -in /etc/v2ray-desk/cert.pem -noout -fingerprint -sha256");
+  $("node-list").replaceChildren();
+  for (const entry of availableNodes) {
+    const row = node("div", undefined, "node-entry");
+    row.append(node("span", entry.name + (entry.last_seen ? " · " + new Date(entry.last_seen).toLocaleString(EN ? "en-US" : "fa-IR") : L(" · هنوز متصل نشده", " · not connected yet"))));
+    const remove = node("button", L("حذف نود", "Remove node"), "text-button danger"); remove.type = "button";
+    remove.addEventListener("click", action(async () => {
+      if (!confirm(L(`نود ${entry.name} و نتایجش حذف شود؟`, `Remove node ${entry.name} and its results?`))) return;
+      await api(`/api/nodes/${entry.id}`, {}, "DELETE"); await loadNodes(); await refresh();
+    }));
+    row.append(remove); $("node-list").append(row);
+  }
+}
+$("nodes-open").addEventListener("click", action(async () => { $("node-token-area").hidden = true; $("node-token").value = ""; nodeDialog.showModal(); await loadNodes(); }));
+$("node-close").addEventListener("click", () => { $("node-token").value = ""; nodeDialog.close(); });
+nodeDialog.addEventListener("close", () => { $("node-token").value = ""; $("node-token-area").hidden = true; });
+$("node-create").addEventListener("click", action(async () => {
+  const name = $("node-name").value.trim();
+  if (!name) throw Error(L("نام نود را وارد کنید.", "Enter a node name."));
+  $("node-create").disabled = true;
+  try {
+    const data = await (await api("/api/nodes", {name})).json();
+    $("node-token").value = data.token; $("node-token-area").hidden = false; $("node-name").value = "";
+    await loadNodes(); await refresh();
+  } finally { $("node-create").disabled = false; }
+}));
 async function startTest(ids) {
   if (subscriptionSync.running) throw Error(L("تست پس از پایان دریافت ساب‌ها فعال می‌شود.", "Testing is available when subscription syncing finishes."));
   await api("/api/test", {ids, options: readTestOptions()});

@@ -6,9 +6,10 @@ const $ = id => document.getElementById(id);
 const number = new Intl.NumberFormat(EN ? "en-US" : "fa-IR");
 const regions = new Intl.DisplayNames([EN ? "en" : "fa"], {type: "region"});
 const statuses = {healthy:L("دارای پاسخ", "Responding"),failed:L("بدون پاسخ", "No response"),pending:L("تست‌نشده", "Not tested"),testing:L("در حال تست", "Testing"),invalid:L("تنظیمات نامعتبر", "Invalid settings"),error:L("خطای تست", "Test error")};
-const gemini = {http200:"HTTP 200",blocked:"HTTP 403",limited:"HTTP 429",login:L("صفحهٔ ورود", "Sign-in page"),redirect:L("انتقال", "Redirect"),unreachable:L("خطای اتصال", "Connection error"),untested:L("تست‌نشده", "Not tested"),other:L("پاسخ دیگر", "Other response")};
+const gemini = {http200:"HTTP 200",blocked:L("۴۰۳ ناشناس", "Anonymous HTTP 403"),limited:"HTTP 429",login:L("صفحهٔ ورود", "Sign-in page"),redirect:L("انتقال", "Redirect"),unreachable:L("خطای اتصال", "Connection error"),untested:L("تست‌نشده", "Not tested"),other:L("پاسخ دیگر", "Other response")};
 let page = 1, requestNumber = 0, controller, searchTimer;
 let selected = new Set(), visible = [], loading = false, copyingSelection = false;
+let publicNodes = [];
 
 function element(tag, text, className) {
   const item = document.createElement(tag);
@@ -90,6 +91,12 @@ async function copySelected() {
 }
 function render(data) {
   page = data.page;
+  publicNodes = Array.isArray(data.nodes) ? data.nodes : [];
+  const nodeSelect = $("public-node"), selectedNode = nodeSelect.value;
+  nodeSelect.replaceChildren();
+  for (const entry of publicNodes) { const option = element("option", entry.name); option.value = String(entry.id); nodeSelect.append(option); }
+  nodeSelect.hidden = !publicNodes.length;
+  nodeSelect.value = publicNodes.some(entry => String(entry.id) === selectedNode) ? selectedNode : String(publicNodes[0]?.id || "");
   $("public-total").textContent = number.format(data.stats.total);
   $("public-healthy").textContent = number.format(data.stats.healthy);
   $("public-best").textContent = data.stats.best === null ? "—" : `${number.format(Math.round(data.stats.best))} ms`;
@@ -117,9 +124,14 @@ function render(data) {
     const delay = item.status === "healthy" && item.latency_ms !== null ? `${number.format(Math.round(item.latency_ms))} ms` : "—";
     const status = element("td"); status.append(element("span", statuses[item.status] || item.status, `status ${item.status}`));
     const date = item.checked_at ? new Date(item.checked_at).toLocaleString(EN ? "en-US" : "fa-IR", {dateStyle:"short",timeStyle:"short"}) : "—";
+    const remote = item.node_results?.[nodeSelect.value];
+    const remoteText = remote ? (statuses[remote.status] || remote.status) + (remote.status === "healthy" && remote.latency_ms != null ? ` · ${number.format(Math.round(remote.latency_ms))} ms` : "")
+      : item.status === "healthy" && publicNodes.length ? L("در انتظار تست", "Awaiting test") : "—";
+    const remoteCell = element("td", remoteText);
+    if (remote?.checked_at) remoteCell.title = new Date(remote.checked_at).toLocaleString(EN ? "en-US" : "fa-IR");
     row.append(element("td", number.format(item.id), "row-number"), name, element("td", item.protocol.toUpperCase()),
       element("td", countryName(item.country)), element("td", delay, "latency"), status,
-      element("td", gemini[item.gemini_status] || "—"), element("td", date, "checked-date"));
+      element("td", gemini[item.gemini_status] || "—"), remoteCell, element("td", date, "checked-date"));
     const cell = element("td"), button = element("button", L("کپی", "Copy"), "secondary copy-button");
     button.setAttribute("aria-label", L(`کپی ${item.name}`, `Copy ${item.name}`));
     button.addEventListener("click", () => copy(item.id, button)); cell.append(button); row.append(cell);
@@ -132,6 +144,7 @@ function render(data) {
   $("public-next").disabled = page >= data.pages;
   syncSelection();
 }
+$("public-node").addEventListener("change", () => load());
 async function load() {
   const current = ++requestNumber;
   loading = true; syncSelection();

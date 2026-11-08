@@ -59,3 +59,4 @@ html[dir=ltr] .collection-heading h2 span{margin-right:0;margin-left:6px}
 .status.invalid{color:#7843a1;background:#f3eafa}.actions{flex-wrap:wrap}.collection-heading{gap:16px}.footnote b{font-weight:500;white-space:nowrap}
 .dialog-notice{margin:0 0 16px;padding:12px 15px;border:1px solid #c5d9c6;border-radius:9px;background:#edf5e8;color:#245b36;font-size:12px;line-height:1.8;overflow-wrap:anywhere}.dialog-notice.bad-notice{border-color:#e8bdb5;background:#fff0ec;color:#8b3026}
 dialog .group-toggle input[type=checkbox]{width:auto;flex:none}
+.node-entry{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid #e5eedb;font-size:12px}.node-entry span,#node-fingerprint{overflow-wrap:anywhere}#node-create{margin-top:10px}
