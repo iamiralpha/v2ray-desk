@@ -63,6 +63,25 @@ def initialize(data_dir):
             fingerprint TEXT PRIMARY KEY,
             rejected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         );
+        CREATE TABLE IF NOT EXISTS nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen TEXT
+        );
+        CREATE TABLE IF NOT EXISTS node_results (
+            node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            config_id INTEGER NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
+            fingerprint TEXT NOT NULL, source_checked_at TEXT NOT NULL,
+            status TEXT NOT NULL, latency_ms INTEGER, checked_at TEXT NOT NULL,
+            PRIMARY KEY(node_id,config_id)
+        );
+        CREATE TABLE IF NOT EXISTS node_assignments (
+            node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            config_id INTEGER NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
+            fingerprint TEXT NOT NULL, source_checked_at TEXT NOT NULL,
+            lease TEXT NOT NULL, expires_at INTEGER NOT NULL,
+            PRIMARY KEY(node_id,config_id)
+        );
+        CREATE INDEX IF NOT EXISTS node_assignments_expiry ON node_assignments(node_id,expires_at);
         """)
         db.execute("INSERT OR IGNORE INTO settings VALUES ('secret',?)", (secrets.token_hex(32),))
         db.execute("INSERT OR IGNORE INTO settings VALUES ('auth_version','1')")

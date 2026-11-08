@@ -25,6 +25,11 @@ from .http_probe import proxy_get
 
 TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 GEMINI_URL = "https://gemini.google.com/app"
+GEMINI_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 DELAY_TARGETS = {
     "cloudflare": "https://cp.cloudflare.com/generate_204",
     "google": "https://www.google.com/generate_204",
@@ -116,28 +121,36 @@ def lookup_country(port, timeout, stop=None):
 
 def probe_gemini(port, timeout, stop=None):
     """HTTP accessibility only; never claim an account can use Gemini."""
+    redirected_status = "redirect"
+
+    def follow(target, code, headers):
+        nonlocal redirected_status
+        if code not in {301, 302, 303, 307, 308}:
+            return None
+        location = headers.get("Location")
+        if not location or any(ord(character) < 33 for character in location):
+            return None
+        try:
+            destination = urljoin(target, location)
+            parsed = urlsplit(destination)
+            if (parsed.scheme != "https" or parsed.username is not None or parsed.password is not None
+                    or parsed.port not in {None, 443}):
+                return None
+        except ValueError:
+            return None
+        if parsed.hostname == "accounts.google.com":
+            redirected_status = "login"
+        elif parsed.hostname == "gemini.google.com":
+            return destination
+        # Consent/challenge pages and other destinations are not Gemini. Report
+        # their redirect without visiting them or mistaking their 200 for success.
+        return None
+
     try:
-        target = GEMINI_URL
-        deadline = time.monotonic() + timeout * 2
-        for _ in range(6):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or (stop and stop.is_set()):
-                return "unreachable", None
-            code, headers, _ = proxy_get(port, target, remaining, stop=stop)
-            if code in {301, 302, 303, 307, 308}:
-                location = headers.get("Location")
-                if not location:
-                    return "redirect", code
-                target = urljoin(target, location)
-                parsed = urlsplit(target)
-                if (parsed.scheme != "https" or parsed.username is not None or parsed.password is not None
-                        or not (parsed.hostname or "").endswith(".google.com")):
-                    return "redirect", code
-                if parsed.hostname == "accounts.google.com":
-                    return "login", code
-                continue
-            return {403: "blocked", 429: "limited", 200: "http200"}.get(code, "other"), code
-        return "redirect", code
+        code, _, _ = proxy_get(port, GEMINI_URL, timeout * 2, stop=stop, redirect=follow, headers=GEMINI_HEADERS)
+        if code in {301, 302, 303, 307, 308}:
+            return redirected_status, code
+        return {403: "blocked", 429: "limited", 200: "http200"}.get(code, "other"), code
     except (aiohttp.ClientError, OSError, ValueError):
         return "unreachable", None
 
@@ -344,9 +357,13 @@ class TestManager:
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.state = {"running": False, "total": 0, "done": 0, "active": 0, "cancelled": False,
-                      "workers": workers, "options": {**DEFAULT_OPTIONS, "workers": workers}, "auto_deleted": 0}
+                      "workers": workers, "options": {**DEFAULT_OPTIONS, "workers": workers}, "auto_deleted": 0,
+                      "phase": "idle", "phase_done": 0, "phase_total": 0}
         self._outcomes = {}
+        self._delay_status = {}
+        self._metadata_completed = set()
         self._job_unsafe = False
+        self._phase_started = None
         self.started = None
         self.ended = None
         self.epoch = uuid.uuid4().hex
@@ -359,12 +376,13 @@ class TestManager:
     def snapshot(self):
         with self.lock:
             elapsed = ((self.ended or time.monotonic()) - self.started) if self.started else 0
-            done = self.state["done"]
-            rate = done / elapsed if elapsed else 0
-            waiting = max(0, self.state["total"] - done - self.state["active"])
+            phase_elapsed = ((self.ended or time.monotonic()) - self._phase_started) if self._phase_started else 0
+            done, total = self.state["phase_done"], self.state["phase_total"]
+            rate = done / phase_elapsed if phase_elapsed else 0
+            waiting = max(0, total - done - self.state["active"])
             return {**self.state, "elapsed": round(elapsed, 1), "rate": round(rate, 2),
                     "queued": waiting,
-                    "eta": round((self.state["total"] - done) / rate) if rate and self.state["running"] else None}
+                    "eta": round((total - done) / rate) if rate and self.state["running"] else None}
 
     def invalidate(self):
         with self.lock:
@@ -405,10 +423,14 @@ class TestManager:
                 raise ValueError("کانفیگی برای تست انتخاب نشده است.")
             self.stop.clear()
             self._outcomes = {}
+            self._delay_status = {}
+            self._metadata_completed = set()
             self._job_unsafe = False
             self.started, self.ended = time.monotonic(), None
+            self._phase_started = self.started
             self.state = {"running": True, "total": len(rows), "done": 0, "active": 0, "cancelled": False,
-                          "workers": min(options["workers"], len(rows)), "options": options, "auto_deleted": 0}
+                          "workers": min(options["workers"], len(rows)), "options": options, "auto_deleted": 0,
+                          "phase": "delay", "phase_done": 0, "phase_total": len(rows)}
             try:
                 threading.Thread(target=self._run, args=(rows, options), daemon=True).start()
             except Exception:
@@ -449,11 +471,54 @@ class TestManager:
         with self.lock:
             if row["id"] not in self._outcomes:
                 self.state["done"] += 1
+            self.state["phase_done"] = self.state["done"]
+            self._delay_status[row["id"]] = outcome["status"]
             self._outcomes[row["id"]] = (
                 "healthy" if outcome["status"] == "healthy" or outcome.get("real_delay_response_received") is True else
                 "failed" if outcome["status"] == "failed" and outcome.get("real_delay_connection_failure") is True else None
             )
             self.changed(row["id"])
+
+    def _save_metadata(self, row, values):
+        # Metadata never replaces the persisted delay or its failure classification.
+        keys = [key for key in ("country", "exit_ip", "gemini_status", "gemini_code") if key in values]
+        if self.stop.is_set():
+            return
+        with connect(self.db_path) as db:
+            if keys:
+                # Wait for SQLite's writer outside the manager lock so Stop and
+                # progress reads remain available during database contention.
+                db.execute("BEGIN IMMEDIATE")
+            with self.lock:
+                if self.stop.is_set() or row["id"] in self._metadata_completed:
+                    return
+                if keys:
+                    db.execute("UPDATE configs SET " + ",".join(key + "=?" for key in keys) + " WHERE id=?",
+                               [values[key] for key in keys] + [row["id"]])
+                    db.commit()
+                    self.changed(row["id"])
+                self._metadata_completed.add(row["id"])
+                self.state["phase_done"] += 1
+
+    def _one_metadata(self, row, options, ports):
+        if self.stop.is_set():
+            return
+        values = {}
+        if options["country"] and self._delay_status[row["id"]] == "healthy":
+            try:
+                country, address = lookup_country(ports[row["id"]], options["timeout"], self.stop)
+            except Exception:
+                country, address = None, None
+            values.update(country=country, exit_ip=address)
+        if self.stop.is_set():
+            return
+        if options["gemini"]:
+            try:
+                status, code = probe_gemini(ports[row["id"]], options["timeout"], self.stop)
+            except Exception:
+                status, code = "unreachable", None
+            values.update(gemini_status=status, gemini_code=code)
+        self._save_metadata(row, values)
 
     def _finish_failure_streaks(self, options):
         """Apply one outcome per configuration only after an uncancelled job."""
@@ -478,9 +543,10 @@ class TestManager:
         if deleted:
             self.invalidate()
 
-    def _drain(self, rows, options, ports=None):
+    def _drain(self, rows, options, ports=None, operation=None):
         # Only worker-count futures exist, even with 10,000 configurations.
         queue = deque(rows)
+        operation = operation or self._one
         def worker():
             while True:
                 with self.lock:
@@ -489,7 +555,7 @@ class TestManager:
                     row = queue.popleft()
                     self.state["active"] += 1
                 try:
-                    self._one(row, options, ports)
+                    operation(row, options, ports)
                 finally:
                     with self.lock:
                         self.state["active"] -= 1
@@ -532,8 +598,6 @@ class TestManager:
         while prepared and not self.stop.is_set():
             try:
                 with shared_core(prepared, self.executable, self.stop) as ports:
-                    with self.lock:
-                        self.state["phase"] = "testing"
                     self._drain(prepared, options, ports)
                 return
             except CoreStoppedError:
@@ -559,6 +623,19 @@ class TestManager:
                 self._core_error(prepared)
                 return
 
+    def _metadata_batch(self, prepared, options):
+        if not prepared or self.stop.is_set():
+            return
+        try:
+            with shared_core(prepared, self.executable, self.stop) as ports:
+                self._drain(prepared, options, ports, operation=self._one_metadata)
+        except (ConfigError, OSError, subprocess.TimeoutExpired):
+            # These rows already completed delay testing. A metadata core failure
+            # cannot invalidate that measurement or authorize automatic deletion.
+            self._job_unsafe = True
+            for row in prepared:
+                self._save_metadata(row, {})
+
     def _run(self, rows, options):
         completed = False
         try:
@@ -567,11 +644,11 @@ class TestManager:
                 completed = True
                 return
             batch_size = min(MAX_BATCH_SIZE, options["workers"] * 4)
+            prepared_rows = []
+            delay_options = {**options, "country": False, "gemini": False}
             for offset in range(0, len(rows), batch_size):
                 if self.stop.is_set():
                     break
-                with self.lock:
-                    self.state["phase"] = "preparing"
                 def prepare(row):
                     if self.stop.is_set():
                         return None
@@ -587,7 +664,23 @@ class TestManager:
                         return None
                 with ThreadPoolExecutor(max_workers=options["workers"]) as pool:
                     prepared = [item for item in pool.map(prepare, rows[offset:offset + batch_size]) if item]
-                self._batch(prepared, options)
+                self._batch(prepared, delay_options)
+                prepared_rows.extend(prepared)
+            if not self.stop.is_set() and self.state["done"] == self.state["total"]:
+                # Retain the original parsed settings and pinned IP for the second
+                # pass. No metadata request may start before this job-wide barrier.
+                metadata_rows = [row for row in prepared_rows
+                                 if self._delay_status.get(row["id"]) in {"healthy", "failed"}
+                                 and (options["gemini"] or
+                                      (options["country"] and self._delay_status[row["id"]] == "healthy"))]
+                if metadata_rows:
+                    with self.lock:
+                        self._phase_started = time.monotonic()
+                        self.state.update(phase="metadata", phase_done=0, phase_total=len(metadata_rows))
+                    for offset in range(0, len(metadata_rows), batch_size):
+                        if self.stop.is_set():
+                            break
+                        self._metadata_batch(metadata_rows[offset:offset + batch_size], options)
             completed = True
         finally:
             with self.lock:

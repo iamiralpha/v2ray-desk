@@ -56,16 +56,25 @@ def run_bounded(operation, timeout, stop=None):
     return asyncio.run(run())
 
 
-def proxy_get(port, url, timeout, *, limit=0, stop=None):
+def proxy_get(port, url, timeout, *, limit=0, stop=None, redirect=None, headers=None):
+    """Get through SOCKS; an optional policy may follow up to five redirects."""
     async def request():
         connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{port}", rdns=True)
         async with aiohttp.ClientSession(connector=connector, trust_env=False,
                                         auto_decompress=False,
-                                        headers={"Accept-Encoding": "identity"},
+                                        headers={"Accept-Encoding": "identity", **(headers or {})},
                                         timeout=aiohttp.ClientTimeout(total=timeout)) as client:
-            async with client.get(url, allow_redirects=False) as response:
-                body = await read_limited(response, limit) if limit and response.status == 200 else b""
-                return response.status, response.headers, body
+            target = url
+            for hop in range(6):
+                if stop is not None and stop.is_set():
+                    raise TimeoutError("Request cancelled.")
+                async with client.get(target, allow_redirects=False) as response:
+                    following = redirect(target, response.status, response.headers) if redirect else None
+                    if following and hop < 5:
+                        target = following
+                        continue
+                    body = await read_limited(response, limit) if limit and response.status == 200 else b""
+                    return response.status, response.headers, body
     try:
         return run_bounded(request(), timeout, stop)
     except (ProxyError, ProxyConnectionError, ProxyTimeoutError):

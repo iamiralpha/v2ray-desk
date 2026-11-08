@@ -22,6 +22,7 @@ from .tester import TestManager
 from .subscriptions import fetch_subscription, validate_url, reconcile, prune
 from .presets import PRESETS, PROVIDERS, SEED_MARKER, existing_sources, install_presets, url_identity
 from .public import create_public_blueprint
+from .nodes import create_nodes_blueprint, node_views, public_nodes
 
 
 def create_app(data_dir=None, test_config=None):
@@ -44,6 +45,7 @@ def create_app(data_dir=None, test_config=None):
         app.config.update(test_config)
     manager = TestManager(db_path, os.environ.get("XRAY_BIN", "xray"))
     app.extensions["tester"] = manager
+    app.register_blueprint(create_nodes_blueprint(db_path, manager))
     syncing = set()
     sync_progress = {"total": 0, "done": 0}
     if not setting(db_path, "password_hash"):
@@ -133,6 +135,10 @@ def create_app(data_dir=None, test_config=None):
         if request.args.get("lang") in {"fa", "en"}:
             session["lang"] = request.args["lang"]
         if request.path == "/healthz":
+            return None
+        # Nodes use narrowly scoped bearer credentials; all admin endpoints keep
+        # the existing session and CSRF protections.
+        if request.endpoint in {"node_api.pull", "node_api.report"}:
             return None
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             supplied = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token", "")
@@ -263,6 +269,7 @@ def create_app(data_dir=None, test_config=None):
             with connect(db_path) as db:
                 rows = db.execute(query + " ORDER BY id DESC", params).fetchall()
                 items = {row["id"]: {**dict(row), "subscription_ids": []} for row in rows}
+                node_views(db, items)
                 if items:
                     memberships = db.execute("SELECT config_id,subscription_id FROM subscription_configs WHERE config_id IN ("
                                              + ",".join("?" for _ in items) + ") ORDER BY subscription_id", list(items))
@@ -271,7 +278,8 @@ def create_app(data_dir=None, test_config=None):
                 sources = [dict(row) for row in db.execute("""SELECT s.id,s.name,COUNT(sc.config_id) AS config_count
                     FROM subscriptions s LEFT JOIN subscription_configs sc ON sc.subscription_id=s.id
                     GROUP BY s.id ORDER BY s.id""")]
-            return jsonify(configs=list(items.values()), job=manager.snapshot(), subscriptions=sources,
+                current_nodes = public_nodes(db)
+            return jsonify(configs=list(items.values()), nodes=current_nodes, job=manager.snapshot(), subscriptions=sources,
                            subscription_sync=sync_snapshot(), cursor=cursor, full=changed is None, engine=manager.engine)
 
     @app.get("/api/configs/<int:config_id>")

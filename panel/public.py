@@ -6,6 +6,7 @@ from flask import Blueprint, jsonify, request
 
 from .parser import ConfigError
 from .store import connect
+from .nodes import node_views, public_nodes
 
 
 def create_public_blueprint(db_path):
@@ -50,7 +51,10 @@ def create_public_blueprint(db_path):
             stats = dict(db.execute("""SELECT COUNT(*) AS total,
                 COALESCE(SUM(status='healthy'),0) AS healthy,
                 MIN(CASE WHEN status='healthy' THEN latency_ms END) AS best FROM configs""").fetchone())
-        return jsonify(configs=[dict(row) for row in rows], total=total, page=page, pages=pages,
+            items = {row["id"]: dict(row) for row in rows}
+            node_views(db, items)
+            nodes = public_nodes(db)
+        return jsonify(configs=list(items.values()), nodes=nodes, total=total, page=page, pages=pages,
                        countries=countries, stats=stats)
 
     @public.get("/api/public/configs/<int:config_id>")
