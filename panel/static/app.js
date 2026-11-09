@@ -22,19 +22,52 @@ function updateNodes(items) {
   const changed = JSON.stringify(next) !== JSON.stringify(availableNodes);
   if (!changed) return false;
   availableNodes = next;
-  const select = $("node-select"), selected = select.value;
-  select.replaceChildren();
+  const select = $("node-select"), selectedNode = select.value;
+  const allNodes = node("option", L("همهٔ نودها", "All nodes")); allNodes.value = "";
+  select.replaceChildren(allNodes);
+  const scopes = [""];
+  if (availableNodes.some(entry => entry.location === "iran")) {
+    const option = node("option", L("همهٔ نودهای ایران", "All Iran nodes")); option.value = "iran";
+    select.append(option); scopes.push("iran");
+  }
   for (const entry of availableNodes) {
-    const option = node("option", entry.name); option.value = String(entry.id); select.append(option);
+    const option = node("option", `${entry.name} · ${entry.location === "iran" ? L("ایران", "Iran") : L("سایر", "Other")}`);
+    option.value = `node:${entry.id}`; select.append(option); scopes.push(option.value);
   }
   select.hidden = !availableNodes.length;
-  select.value = availableNodes.some(entry => String(entry.id) === selected) ? selected : String(availableNodes[0]?.id || "");
+  select.value = scopes.includes(selectedNode) ? selectedNode : "";
+  if (selectedNode && !scopes.includes(selectedNode)) {
+    $("status-filter").value = ""; page = 1; selected.clear();
+  }
   return true;
 }
+function syncQuickFilters() {
+  const scope = $("node-select").value, hasIran = availableNodes.some(entry => entry.location === "iran");
+  $("quick-main").setAttribute("aria-pressed", String(!scope && $("status-filter").value === "healthy"));
+  $("quick-node").setAttribute("aria-pressed", String(scope === "iran"));
+  $("quick-node").disabled = !hasIran;
+  $("quick-node-label").textContent = L("کانفیگ متصل در ایران", "Connected in Iran");
+  $("quick-node-hint").textContent = hasIran ? L("همهٔ نودهای ایران", "All Iran nodes") : L("هنوز نود ایرانی موجود نیست", "No Iran node available");
+  $("quick-main").title = L("برای نمایش همه دوباره بزنید", "Click again to show all");
+  $("quick-node").title = hasIran ? L("اتصال موفق در حداقل یکی از نودهای ایران؛ برای نمایش همه دوباره بزنید", "Working on at least one Iran node; click again to show all") : L("هنوز نود ایرانی موجود نیست", "No Iran node available");
+}
+function quickFilter(target) {
+  if (target === "node" && !availableNodes.some(entry => entry.location === "iran")) return;
+  const scope = $("node-select").value;
+  const active = target === "node" ? scope === "iran" : !scope && $("status-filter").value === "healthy";
+  $("node-select").value = target === "node" && !active ? "iran" : "";
+  $("status-filter").value = active ? "" : "healthy";
+  resetView();
+}
 function nodeResult(item) {
-  const value = item.node_results?.[$("node-select").value];
-  if (!value) return item.status === "healthy" && availableNodes.length ? L("در انتظار تست", "Awaiting test") : "—";
-  return (statusNames[value.status] || value.status) + (value.status === "healthy" && value.latency_ms != null ? ` · ${num.format(Math.round(value.latency_ms))} ms` : "");
+  const scope = $("node-select").value;
+  const nodes = availableNodes.filter(entry => !scope || (scope === "iran" ? entry.location === "iran" : scope === `node:${entry.id}`));
+  const summary = nodes.flatMap(entry => {
+    const value = item.node_results?.[String(entry.id)];
+    if (!value) return [];
+    return [`${entry.name}: ${statusNames[value.status] || value.status}${value.status === "healthy" && value.latency_ms != null ? ` · ${num.format(Math.round(value.latency_ms))} ms` : ""}`];
+  }).join(" | ");
+  return summary || (item.status === "healthy" && nodes.length ? L("در انتظار تست", "Awaiting test") : "—");
 }
 
 function countryName(code) {
@@ -111,10 +144,13 @@ function filtered() {
   const status = $("status-filter").value;
   const gemini = $("gemini-filter").value;
   const protocol = $("protocol-filter").value;
+  const nodeScope = $("node-select").value;
+  const matchingNodes = availableNodes.filter(entry => nodeScope === "iran" ? entry.location === "iran" : nodeScope === `node:${entry.id}`);
   const list = records.filter(item => (!activeCountry || (item.country || "unknown") === activeCountry)
     && (!activeSubscription || (activeSubscription === "none" ? !(item.subscription_ids || []).length : (item.subscription_ids || []).includes(Number(activeSubscription))))
     && (!protocol || item.protocol === protocol)
     && (!status || item.status === status)
+    && (!nodeScope || (item.status === "healthy" && matchingNodes.some(entry => item.node_results?.[String(entry.id)]?.status === "healthy")))
     && (!gemini || item.gemini_status === gemini)
     && (!term || `${item.name} ${item.host} ${item.protocol} ${countryName(item.country)}`.toLowerCase().includes(term)));
   const sort = $("sort").value, group = $("group").checked;
@@ -240,6 +276,7 @@ function renderCountries() {
   $("all-nav").classList.toggle("active", !activeCountry);
 }
 function render() {
+  syncQuickFilters();
   renderCountries();
   renderSubscriptionFilter();
   const list = filtered();
@@ -317,8 +354,8 @@ function render() {
     const geminiBadge = node("span", geminiNames[item.gemini_status] || L("تست‌نشده", "Not tested"), "status " + ({http200:"healthy",blocked:"failed",limited:"error",login:"pending",unreachable:"error"}[item.gemini_status] || "pending"));
     geminiBadge.title = item.gemini_code ? L(`HTTP ${item.gemini_code}؛ درخواست بدون ورود به گوگل است و وضعیت حساب شما را مشخص نمی‌کند.`, `HTTP ${item.gemini_code}; this anonymous request cannot determine your account access.`) : L("تست درخواست HTTPS به gemini.google.com/app از داخل همین پروکسی", "HTTPS request to gemini.google.com/app through this proxy");
     geminiCell.append(geminiBadge); tr.append(geminiCell);
-    const remote = node("td", nodeResult(item));
-    const remoteData = item.node_results?.[$("node-select").value];
+    const remote = node("td", nodeResult(item), "node-result-cell");
+    const remoteData = item.node_results?.[$("node-select").value.slice(5)];
     if (remoteData?.checked_at) remote.title = new Date(remoteData.checked_at).toLocaleString(EN ? "en-US" : "fa-IR");
     tr.append(remote);
     const checked = node("td", item.checked_at ? new Intl.DateTimeFormat(EN ? "en-US" : "fa-IR", {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}).format(new Date(item.checked_at)) : L("هنوز تست نشده", "Not tested yet"), "checked-date");
@@ -406,22 +443,36 @@ async function refresh() {
     if (subsDialog.open && !subWorking) await loadSubscriptions();
   } finally { fetching = false; }
 }
-$("node-select").addEventListener("change", () => render());
+$("node-select").addEventListener("change", () => { $("status-filter").value = $("node-select").value ? "healthy" : ""; resetView(); });
+$("quick-main").addEventListener("click", () => quickFilter("main"));
+$("quick-node").addEventListener("click", () => quickFilter("node"));
 const nodeDialog = $("node-dialog");
 async function loadNodes() {
   const data = await (await api("/api/nodes")).json();
-  updateNodes(data.nodes);
+  if (updateNodes(data.nodes)) { filterCache = null; render(); }
   $("node-fingerprint").textContent = data.certificate_fingerprint || L("در SSH اثر انگشت گواهی را از دستور زیر بگیرید: openssl x509 -in /etc/v2ray-desk/cert.pem -noout -fingerprint -sha256", "In SSH obtain the fingerprint with: openssl x509 -in /etc/v2ray-desk/cert.pem -noout -fingerprint -sha256");
   $("node-list").replaceChildren();
   for (const entry of availableNodes) {
     const row = node("div", undefined, "node-entry");
     row.append(node("span", entry.name + (entry.last_seen ? " · " + new Date(entry.last_seen).toLocaleString(EN ? "en-US" : "fa-IR") : L(" · هنوز متصل نشده", " · not connected yet"))));
+    const location = node("select");
+    location.setAttribute("aria-label", L(`محل نود ${entry.name}`, `Location of ${entry.name}`));
+    for (const [value, label] of [["iran", L("ایران", "Iran")], ["other", L("سایر کشورها", "Other location")]]) {
+      const option = node("option", label); option.value = value; location.append(option);
+    }
+    location.value = entry.location || "other";
+    location.addEventListener("change", action(async () => {
+      location.disabled = true;
+      try { await api(`/api/nodes/${entry.id}`, {location:location.value}, "PUT"); await loadNodes(); await refresh(); }
+      catch (error) { location.value = entry.location || "other"; throw error; }
+      finally { location.disabled = false; }
+    }));
     const remove = node("button", L("حذف نود", "Remove node"), "text-button danger"); remove.type = "button";
     remove.addEventListener("click", action(async () => {
       if (!confirm(L(`نود ${entry.name} و نتایجش حذف شود؟`, `Remove node ${entry.name} and its results?`))) return;
       await api(`/api/nodes/${entry.id}`, {}, "DELETE"); await loadNodes(); await refresh();
     }));
-    row.append(remove); $("node-list").append(row);
+    row.append(location, remove); $("node-list").append(row);
   }
 }
 $("nodes-open").addEventListener("click", action(async () => { $("node-token-area").hidden = true; $("node-token").value = ""; nodeDialog.showModal(); await loadNodes(); }));
@@ -432,7 +483,7 @@ $("node-create").addEventListener("click", action(async () => {
   if (!name) throw Error(L("نام نود را وارد کنید.", "Enter a node name."));
   $("node-create").disabled = true;
   try {
-    const data = await (await api("/api/nodes", {name})).json();
+    const data = await (await api("/api/nodes", {name, location:$("node-location").value || "iran"})).json();
     $("node-token").value = data.token; $("node-token-area").hidden = false; $("node-name").value = "";
     await loadNodes(); await refresh();
   } finally { $("node-create").disabled = false; }
@@ -500,7 +551,8 @@ for (const id of ["import-open", "empty-import"]) $(id).addEventListener("click"
 $("all-nav").addEventListener("click", () => { activeCountry = ""; resetView(); });
 $("country-filter").addEventListener("change", () => { activeCountry = $("country-filter").value; resetView(); });
 $("subscription-filter").addEventListener("change", () => { activeSubscription = $("subscription-filter").value; resetView(); });
-for (const id of ["search", "protocol-filter", "status-filter", "gemini-filter", "sort", "group"]) $(id).addEventListener(id === "search" ? "input" : "change", resetView);
+for (const id of ["search", "protocol-filter", "gemini-filter", "sort", "group"]) $(id).addEventListener(id === "search" ? "input" : "change", resetView);
+$("status-filter").addEventListener("change", () => { $("node-select").value = ""; resetView(); });
 $("prev-page").addEventListener("click", () => { page--; render(); });
 $("next-page").addEventListener("click", () => { page++; render(); });
 $("select-page").addEventListener("change", () => {
