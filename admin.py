@@ -1,6 +1,7 @@
 #!/opt/v2ray-desk/venv/bin/python
 """Root-only SSH management console. No passwords are stored in this config."""
 import argparse
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -49,12 +50,41 @@ def port_free(port):
             sock.close()
 
 
-def random_port():
+def random_port(exclude=None):
     for _ in range(500):
         port = 10000 + secrets.randbelow(50000)
-        if port_free(port):
+        if port not in (exclude or ()) and port_free(port):
             return port
     raise ValueError("Could not find a free port.")
+
+
+def detect_address():
+    """Find a public IPv4 address; never substitute a private NAT address."""
+    def public_ipv4(value):
+        try:
+            address = ipaddress.ip_address(value.strip())
+        except ValueError:
+            return None
+        return str(address) if address.version == 4 and address.is_global else None
+
+    try:
+        result = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=2)
+        local = {ip for value in result.stdout.split() if (ip := public_ipv4(value))}
+        if len(local) == 1:
+            return local.pop()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for address_service in ("https://api.ipify.org", "https://icanhazip.com"):
+        try:
+            with urllib.request.urlopen(address_service, timeout=4) as response:
+                if not getattr(response, "geturl", lambda: address_service)().startswith("https://"):
+                    continue
+                address = public_ipv4(response.read(64).decode("ascii"))
+                if address:
+                    return address
+        except (OSError, ValueError, UnicodeError):
+            continue
+    return ""
 
 
 def valid_path(value):
@@ -202,14 +232,47 @@ def password_reset(generate=False):
     subprocess.run(args, check=True)
 
 
+def terminal_colors():
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR") and os.environ.get("TERM") != "dumb"
+
+
 def menu(config):
     while True:
-        print("\n=== V2Ray Desk / SSH Manager ===")
-        print("1) Show panel details\n2) Choose a random free port\n3) Set port manually")
-        print("4) Generate a random login path (10 or 20 characters)\n5) Set login path manually")
-        print("6) Check port and HTTPS\n7) Generate a new password\n8) Set password manually")
-        print("9) Restart panel\n10) Show recent service logs\n0) Exit")
-        choice = input("Select: ").strip()
+        green, dim, reset = ("\033[1;32m", "\033[2m", "\033[0m") if terminal_colors() else ("", "", "")
+        print(green + r"""
+ __     __  ____                  ____            _
+ \ \   / / |___ \  _ __ __ _ _   |  _ \  ___  ___| | __
+  \ \ / /    __) || '__/ _` | | | | | | |/ _ \/ __| |/ /
+   \ V /    / __/ | | | (_| | |_| | |_| |  __/\__ \   <
+    \_/    |_____||_|  \__,_|\__, |____/ \___||___/_|\_\
+                             |___/
+""" + reset)
+        print(f"  {green}V2RAY DESK{reset}  {dim}·  SSH management console{reset}")
+        print(f"  {dim}{url(config)}{reset}")
+        print(green + "  " + "─" * 68 + reset)
+        entries = [
+            ("1", "Panel details", "URL, port, path and service"),
+            ("2", "Random port", "choose a free HTTPS port"),
+            ("3", "Set port", "choose the HTTPS port manually"),
+            ("4", "Random path", "generate a 10- or 20-character path"),
+            ("5", "Set path", "choose the login path manually"),
+            ("6", "Check port", "check binding and HTTPS connectivity"),
+            ("7", "Random password", "generate a new admin password"),
+            ("8", "Set password", "choose a new admin password"),
+            ("9", "Restart panel", "restart the panel service"),
+            ("10", "Service logs", "show recent panel logs"),
+            ("11", "Service status", "show the panel service status"),
+            ("12", "Start panel", "start the panel service"),
+            ("0", "Exit", "close the SSH manager"),
+        ]
+        for key, label, description in entries:
+            print(f"  {green}{key:>2}){reset} {label:<22} {dim}{description}{reset}")
+        print(green + "  " + "─" * 68 + reset)
+        try:
+            choice = input("  Select [0-12]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
         try:
             if choice == "0":
                 break
@@ -233,6 +296,11 @@ def menu(config):
                 info(config)
             elif choice == "10":
                 subprocess.run(["journalctl", "-u", "v2ray-desk", "-n", "60", "--no-pager"])
+            elif choice == "11":
+                subprocess.run(["systemctl", "status", "v2ray-desk", "--no-pager"])
+            elif choice == "12":
+                subprocess.run(["systemctl", "start", "v2ray-desk"], check=True)
+                info(config)
         except (ValueError, subprocess.CalledProcessError) as exc:
             print("Error:", exc)
 

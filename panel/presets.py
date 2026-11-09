@@ -7,7 +7,11 @@ from .parser import ConfigError
 PROVIDERS = [
     {"id": "barry", "name": "Barry"},
     {"id": "delta", "name": "Delta"},
-    {"id": "epodonios", "name": "Epodonios"},
+    {"id": "alirewa", "name": "Alirewa"},
+    {"id": "radikal", "name": "Radikal"},
+    {"id": "mohamed", "name": "Mohamed"},
+    {"id": "morpheus", "name": "Morpheus"},
+    {"id": "chaishpish", "name": "Chaishpish"},
 ]
 PRESETS = [
     {"key": f"barry-{index}", "provider": "barry", "name": f"Barry · Sub{index}",
@@ -19,11 +23,19 @@ PRESETS = [
      "enabled": index <= 2}
     for index in range(1, 12)
 ] + [
-    {"key": f"epodonios-{index}", "provider": "epodonios", "name": f"Epodonios · Sub{index}",
-     "url": f"https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Sub{index}.txt", "enabled": index <= 2}
-    for index in range(1, 9)
+    {"key": "alirewa-1", "provider": "alirewa", "name": "Alirewa · Top 100", "url": "https://raw.githubusercontent.com/Alirewa/V2ray-Configs/main/sub1.txt", "enabled": True},
+    {"key": "alirewa-2", "provider": "alirewa", "name": "Alirewa · Sub 2", "url": "https://raw.githubusercontent.com/Alirewa/V2ray-Configs/main/sub2.txt", "enabled": False},
+    {"key": "radikal-1", "provider": "radikal", "name": "Radikal · Top 100", "url": "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/top100.txt", "enabled": True},
+    {"key": "radikal-2", "provider": "radikal", "name": "Radikal · Fast", "url": "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/fast/configs.txt", "enabled": False},
+    {"key": "mohamed-1", "provider": "mohamed", "name": "Mohamed · Batch 1", "url": "https://raw.githubusercontent.com/mrdevmohamed/v2ray-configs/main/Sub1.txt", "enabled": True},
+    {"key": "mohamed-2", "provider": "mohamed", "name": "Mohamed · Batch 2", "url": "https://raw.githubusercontent.com/mrdevmohamed/v2ray-configs/main/Sub2.txt", "enabled": False},
+    {"key": "morpheus-1", "provider": "morpheus", "name": "Morpheus · Mini", "url": "https://raw.githubusercontent.com/morpheusadam/v2ray-config/main/subs/bundles/mini.txt", "enabled": True},
+    {"key": "morpheus-2", "provider": "morpheus", "name": "Morpheus · Medium", "url": "https://raw.githubusercontent.com/morpheusadam/v2ray-config/main/subs/bundles/medium.txt", "enabled": False},
+    {"key": "chaishpish-1", "provider": "chaishpish", "name": "Chaishpish · Latest", "url": "https://raw.githubusercontent.com/chaishpish/free_server_v2ray/main/@TFMTProto", "enabled": True},
 ]
 SEED_MARKER = "subscription_presets_seeded_v1"
+ADDITIONAL_SEED_MARKER = "subscription_presets_extended_v1"
+ADDITIONAL_PROVIDER_IDS = frozenset({"alirewa", "radikal", "mohamed", "morpheus", "chaishpish"})
 
 
 def url_identity(url):

@@ -1,0 +1,140 @@
+name: Ubuntu installer smoke test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Install the published panel
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          installer="$(mktemp)"
+          trap 'rm -f -- "$installer"' EXIT
+          curl -fsSL https://raw.githubusercontent.com/iamiralpha/v2ray-desk/main/install-online.sh -o "$installer"
+          if ! sudo env PANEL_ADDRESS=127.0.0.1 bash "$installer" \
+              >/tmp/v2ray-desk-ci-install.log 2>&1; then
+            sed -E 's/(Panel password: ).*/\1[redacted]/' /tmp/v2ray-desk-ci-install.log | tail -n 100
+            exit 1
+          fi
+
+      - name: Verify services, public results and administrator login
+        shell: bash
+        run: |
+          set -euo pipefail
+          for service in v2ray-desk nginx; do
+            sudo systemctl is-active --quiet "$service"
+          done
+          sudo /opt/v2ray-desk/venv/bin/python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import time
+          from pathlib import Path
+
+          import requests
+
+          config = json.loads(Path('/etc/v2ray-desk/config.json').read_text())
+          assert 10000 <= config['port'] < 60000 and config['port'] != config['backend_port']
+          assert re.fullmatch(r'[A-Za-z0-9]{20}', config['path'])
+          base = f"https://127.0.0.1:{config['port']}/{config['path']}"
+          client = requests.Session()
+          client.trust_env = False
+          client.verify = '/etc/v2ray-desk/cert.pem'
+          for _ in range(20):
+              try:
+                  response = client.get(base + '/api/public/configs', timeout=2)
+                  if response.ok:
+                      break
+              except requests.RequestException:
+                  pass
+              time.sleep(1)
+          else:
+              raise SystemExit('Public endpoint did not become ready.')
+          response.raise_for_status()
+          assert isinstance(response.json(), dict)
+
+          response = client.get(base + '/login?lang=en', timeout=20)
+          response.raise_for_status()
+          csrf = re.search(r'name="csrf_token" value="([^"]+)"', response.text)
+          install_log = Path('/tmp/v2ray-desk-ci-install.log').read_text()
+          password = re.search(r'^Panel password: (.+)$', install_log, re.MULTILINE)
+          assert csrf and password
+          assert install_log.index('installation complete') < password.start() and base + '/' in install_log
+          response = client.post(base + '/login',
+                                 data={'csrf_token': csrf.group(1), 'password': password.group(1)},
+                                 timeout=20, allow_redirects=False)
+          assert response.status_code in (302, 303)
+          client.get(base + '/api/configs', timeout=20).raise_for_status()
+
+          response = client.get(base + '/?lang=en', timeout=20)
+          response.raise_for_status()
+          csrf = re.search(r'name="csrf-token" content="([^"]+)"', response.text)
+          assert csrf
+          response = client.post(base + '/api/nodes', json={'name': 'CI node'},
+                                 headers={'X-CSRF-Token': csrf.group(1)}, timeout=20)
+          response.raise_for_status()
+          token = response.json()['token']
+          response = client.get(base + '/api/nodes', timeout=20)
+          response.raise_for_status()
+          fingerprint = response.json()['certificate_fingerprint']
+          assert re.fullmatch(r'[0-9a-f]{64}', fingerprint)
+          node_input = Path('/tmp/v2ray-desk-ci-node-input')
+          descriptor = os.open(node_input, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+          with os.fdopen(descriptor, 'w') as stream:
+              stream.write('\n'.join([base, fingerprint, token, '4']) + '\n')
+          menu = subprocess.run(['/usr/local/bin/v2ray-desk'], input='0\n', text=True,
+                                capture_output=True, timeout=10, check=True)
+          assert 'V2RAY DESK' in menu.stdout and 'Panel details' in menu.stdout
+          print('Verified installation, HTTPS, public API and administrator login.')
+          PY
+
+      - name: Install and connect the outbound node
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          installer="$(mktemp)"
+          trap 'rm -f -- "$installer"' EXIT
+          curl -fsSL https://raw.githubusercontent.com/iamiralpha/v2ray-desk/main/install-online.sh -o "$installer"
+          if ! sudo bash -c 'exec bash "$1" node </tmp/v2ray-desk-ci-node-input' _ "$installer" \
+              >/tmp/v2ray-desk-ci-node.log 2>&1; then
+            sudo /opt/v2ray-desk/venv/bin/python - <<'PY'
+          from pathlib import Path
+          secret = Path('/tmp/v2ray-desk-ci-node-input').read_text().splitlines()[2]
+          log = Path('/tmp/v2ray-desk-ci-node.log').read_text(errors='replace')
+          print('\n'.join(log.replace(secret, '[redacted]').splitlines()[-100:]))
+          PY
+            exit 1
+          fi
+          sudo systemctl is-active --quiet v2ray-desk-node
+          sudo /opt/v2ray-desk/venv/bin/python - <<'PY'
+          import json
+          import time
+          from pathlib import Path
+
+          import requests
+
+          client = requests.Session()
+          client.trust_env = False
+          client.verify = '/etc/v2ray-desk/cert.pem'
+          base = json.loads(Path('/etc/v2ray-desk-node/config.json').read_text())['url']
+          for _ in range(30):
+              response = client.get(base + '/api/public/configs', timeout=5)
+              response.raise_for_status()
+              if any(node['name'] == 'CI node' and node['last_seen'] for node in response.json()['nodes']):
+                  print('Verified node installation and authenticated polling.')
+                  break
+              time.sleep(1)
+          else:
+              raise SystemExit('Node did not report to the panel.')
+          PY
+          sudo rm -f -- /tmp/v2ray-desk-ci-node-input /tmp/v2ray-desk-ci-install.log

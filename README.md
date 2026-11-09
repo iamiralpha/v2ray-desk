@@ -4,13 +4,29 @@ A self-hosted configuration manager for Ubuntu with public browsing, password-pr
 
 [راهنمای فارسی](README.fa.md)
 
+## Screenshots
+
+The images show synthetic configurations and example nodes.
+
+**Public results**
+
+![Public configuration list and quick filters](docs/screenshots/public-fa.png)
+
+**Administrator workspace**
+
+![Administrator workspace](docs/screenshots/admin-en.png)
+
+**Test nodes**
+
+![Managing test nodes](docs/screenshots/nodes-en.png)
+
 ## Features
 
 - Password-protected dashboard, secure sessions, CSRF protection and login rate limiting.
 - Bulk import of VLESS, VMess, Trojan and Shadowsocks links from text or files, including Base64 subscription text.
 - Subscription URL management: add, edit, refresh individually or together, and delete with optional removal of source-only configurations.
-- Public, read-only results with country/protocol filters, Real Delay, Gemini status and individual or selected-configuration copying; management requires sign-in.
-- A built-in catalog of 27 verified subscription URLs, daily refresh/testing, and optional deletion after two consecutive real connection failures.
+- Public, read-only results with country/protocol filters, quick views for the main server and all Iran nodes, Real Delay, Gemini status and copying; management requires sign-in.
+- A built-in catalog of 28 subscription URLs, daily refresh/testing, and optional deletion after two consecutive real connection failures.
 - v2rayN-style Real Delay: two GETs over a reusable connection, minimum latency and 1–128 parallel workers with a shared Xray core.
 - Exit-country detection, selectable country filtering, grouping, search and delay sorting.
 - Gemini HTTP check through the same proxy: 200, 403, 429, sign-in redirect and connection failures.
@@ -35,10 +51,13 @@ Alternatively, download/extract this repository, then run:
 sudo bash install.sh
 ```
 
-Enter the server IP or domain. Choose an automatic or manual password.
-The installer selects a free random HTTPS port and a random 20-character login path,
-and prints the URL and initial password. It installs a dedicated Xray v26.10.31 binary,
-verifies its SHA-256, and starts the panel under a restricted service account.
+The installer detects a public IPv4 address, selects a free random HTTPS port and a
+random 20-character path, generates an admin password, and prints the complete details
+at the end. It uses a public address on the host when unambiguous; otherwise it queries
+`api.ipify.org` or `icanhazip.com`. If detection fails, it asks for the address.
+Verify the printed address when the server is behind NAT or a proxy. A reinstall preserves
+the existing password and cannot display it again. Xray v26.10.31 is downloaded from its
+official release, checked with SHA-256 and run under a restricted service account.
 
 To select the port and path during installation:
 
@@ -50,9 +69,11 @@ sudo PANEL_ADDRESS=panel.example.com PANEL_HTTPS_PORT=9443 \
   PANEL_BASE_PATH=MyPrivateDashboard PANEL_PASSWORD_MODE=manual bash install.sh
 ```
 
-`PANEL_BACKEND_PORT` defaults to `18080` and is bound to loopback only.
+The backend uses `18080` when free or another free port, and is bound to loopback only;
+`PANEL_BACKEND_PORT` overrides it.
 Existing Nginx virtual hosts are preserved. A new Nginx installation does not bind port 80.
-The installer does not change firewall rules; allow the printed HTTPS port in UFW and any provider firewall.
+If UFW is active, the installer adds an allow rule for the panel port without removing existing
+rules. Allow the printed HTTPS port in any provider firewall as well.
 
 The included TLS certificate is self-signed, so a browser trust warning is expected.
 The installer prints its SHA-256 fingerprint. For a domain with a trusted certificate,
@@ -143,7 +164,8 @@ With country grouping enabled, delay sorting is applied within each group; disab
 
 ## Remote test nodes
 
-In the administrator panel, open **Test nodes**, add a name such as `Iran`, and save the
+In the administrator panel, open **Test nodes**, add a name such as `Tehran 1`, choose
+**Iran** as its location, and save the
 one-time node token and certificate fingerprint shown there. On the Ubuntu node run:
 
 ```bash
@@ -154,11 +176,13 @@ Enter the main panel's full HTTPS URL, the SHA-256 fingerprint displayed in the 
 the one-time token, and the desired worker count. The installer verifies the certificate
 fingerprint before sending the token. Nodes initiate outbound connections and need no inbound port.
 They use the same Real Delay method and retrieve only configurations whose latest main-server
-test succeeded. Results and timestamps are separate for each node; the table lets both visitors
-and the administrator select a node. A new main-server test makes old node results unavailable
-until that node retests. Nodes poll automatically; removing a node revokes its token and results.
-Node tokens and configuration links are sensitive: the node configuration is owned by root and readable only by its dedicated service group; its temporary database belongs to the service account. Changing the panel certificate
-requires rerunning the node installer with `NODE_RECONFIGURE=1` and the new verified fingerprint.
+test succeeded. Results are stored on the main server, so displaying the table does not contact
+the nodes. **Connected in Iran** includes a configuration if it passed on at least one Iran node;
+the node filter can narrow results to a named node. Locations of existing nodes default to
+**Other** after upgrading and can be changed in Test nodes. A new main-server test makes old
+node results unavailable until that node retests. Nodes poll automatically; removing a node
+revokes its token and results.
+Node tokens and configuration links are sensitive: the node configuration is owned by root and readable only by its dedicated service group; its temporary database belongs to the service account. After changing the panel certificate, download the installer again and run `sudo env NODE_RECONFIGURE=1 bash "$f" node` with the new verified fingerprint.
 
 
 ## Supported formats and limits
@@ -246,12 +270,15 @@ if the source still contains them. Subscription URLs may contain secrets and sta
 database; they are shown only in the authenticated edit form. Public HTTP/HTTPS destinations
 only: private/local addresses, insecure TLS, and HTTPS-to-HTTP redirects are rejected.
 
-The built-in catalog registers 27 feeds once: 8 from [Barry](https://github.com/barry-far/v2ray-config),
-11 V2Ray batches from [Delta](https://github.com/Delta-Kronecker/V2ray-Config), and 8 from
-[Epodonios](https://github.com/Epodonios/v2ray-configs). The first two feeds per provider are enabled
-and downloaded automatically; enable additional feeds in Subscriptions. Existing matching URLs,
+The built-in catalog registers 28 feeds once: 8 from [Barry](https://github.com/barry-far/v2ray-config),
+11 from [Delta](https://github.com/Delta-Kronecker/V2ray-Config), and 9 from
+[Alirewa](https://github.com/Alirewa/V2ray-Configs), [Radikal](https://github.com/0xRadikal/Free-v2ray-Configs),
+[Mohamed](https://github.com/mrdevmohamed/v2ray-configs), [Morpheus](https://github.com/morpheusadam/v2ray-config),
+and [Chaishpish](https://github.com/chaishpish/free_server_v2ray). Nine feeds are enabled and
+downloaded automatically; enable additional feeds in Subscriptions. The former Epodonios source
+was unavailable when checked; existing user subscriptions are not deleted. Existing matching URLs,
 custom names and disabled choices are preserved. Removed sources stay removed after restart;
-**Add missing** restores the selected provider's missing entries. URLs were checked on 2026-10-21;
+**Add missing** restores the selected provider's missing entries. New URLs were checked on 2026-11-09;
 upstream contents and availability can change. A failed refresh preserves the previous collection.
 
 Deduplication uses a hash of canonical Xray connection settings, excluding the display name.

@@ -65,7 +65,8 @@ def initialize(data_dir):
         );
         CREATE TABLE IF NOT EXISTS nodes (
             id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
-            token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen TEXT
+            token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen TEXT,
+            location TEXT NOT NULL DEFAULT 'other' CHECK(location IN ('iran','other'))
         );
         CREATE TABLE IF NOT EXISTS node_results (
             node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
@@ -85,6 +86,9 @@ def initialize(data_dir):
         """)
         db.execute("INSERT OR IGNORE INTO settings VALUES ('secret',?)", (secrets.token_hex(32),))
         db.execute("INSERT OR IGNORE INTO settings VALUES ('auth_version','1')")
+        node_columns = {row["name"] for row in db.execute("PRAGMA table_info(nodes)")}
+        if "location" not in node_columns:
+            db.execute("ALTER TABLE nodes ADD COLUMN location TEXT NOT NULL DEFAULT 'other' CHECK(location IN ('iran','other'))")
         columns = {row["name"] for row in db.execute("PRAGMA table_info(configs)")}
         if "real_failure_streak" not in columns:
             db.execute("ALTER TABLE configs ADD COLUMN real_failure_streak INTEGER NOT NULL DEFAULT 0")

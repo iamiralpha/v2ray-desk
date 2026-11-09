@@ -46,8 +46,8 @@ def catalog(monkeypatch):
 def test_testing_does_not_seed_or_start_downloads_by_default(client):
     assert client.get("/api/subscriptions").json["subscriptions"] == []
     data = client.get("/api/subscriptions/presets").json
-    assert len(data["presets"]) == 27
-    assert sum(provider["default_enabled"] for provider in data["providers"]) == 6
+    assert len(data["presets"]) == 28
+    assert sum(provider["default_enabled"] for provider in data["providers"]) == 9
     assert not data["subscription_sync"]["running"]
 
 
@@ -82,6 +82,30 @@ def test_seed_once_preserves_existing_source_and_deleted_sources_stay_deleted(tm
     restarted = authenticated(make_app(tmp_path, PRESET_AUTO_SEED=True))
     assert len(restarted.get("/api/subscriptions").json["subscriptions"]) == 2
     assert fetched == [catalog[1]["url"]]
+
+
+def test_catalog_upgrade_adds_new_providers_once_without_restoring_old_deletions(tmp_path, monkeypatch):
+    from panel.presets import SEED_MARKER
+    path = initialize(tmp_path)
+    old = {"key": "barry-1", "provider": "barry", "name": "Old", "url": "https://example.com/old", "enabled": True}
+    kept = {"key": "alirewa-1", "provider": "alirewa", "name": "Default", "url": "https://example.com/kept", "enabled": True}
+    added = {"key": "alirewa-2", "provider": "alirewa", "name": "New", "url": "https://example.com/new", "enabled": True}
+    monkeypatch.setattr("panel.app.PRESETS", [old, kept, added])
+    fetched = []
+    monkeypatch.setattr("panel.app.fetch_subscription", lambda url: fetched.append(url) or LINK)
+    with connect(path) as db:
+        db.execute("INSERT INTO settings(key,value) VALUES (?, '1')", (SEED_MARKER,))
+        db.execute("INSERT INTO subscriptions(name,url,enabled) VALUES (?,?,0)", ("My choice", kept["url"]))
+    user = authenticated(make_app(tmp_path, PRESET_AUTO_SEED=True))
+    wait_for(lambda: not user.get("/api/configs").json["subscription_sync"]["running"])
+    rows = user.get("/api/subscriptions").json["subscriptions"]
+    assert {row["name"] for row in rows} == {"My choice", "New"}
+    assert next(row for row in rows if row["name"] == "My choice")["enabled"] == 0
+    assert fetched == [added["url"]]
+    new_id = next(row["id"] for row in rows if row["name"] == "New")
+    assert send(user, f"/api/subscriptions/{new_id}", {}, "delete").status_code == 200
+    restarted = authenticated(make_app(tmp_path, PRESET_AUTO_SEED=True))
+    assert [row["name"] for row in restarted.get("/api/subscriptions").json["subscriptions"]] == ["My choice"]
 
 
 def test_initial_sync_reserves_all_pending_sources_and_uses_one_worker(tmp_path, monkeypatch, catalog):

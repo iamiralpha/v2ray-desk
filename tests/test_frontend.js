@@ -105,25 +105,57 @@ test("admin table shows the selected node result alongside the main result", asy
   const app = await loadApp();
   const config = {...row(1,"DE"),status:"healthy",latency_ms:91,
     node_results:{"2":{status:"failed",latency_ms:null},"3":{status:"healthy",latency_ms:55}}};
-  const job = {...blankSnapshot,configs:[config],nodes:[{id:2,name:"Iran"},{id:3,name:"Other"}]};
+  const job = {...blankSnapshot,configs:[config],nodes:[{id:2,name:"Iran",location:"iran"},{id:3,name:"Other",location:"other"}]};
   app.setHandler(async()=>response(job));
   await app.run("refresh()");
-  assert.equal(app.get("rows").children[0].children.at(-3).textContent,"No response");
-  app.get("node-select").value="3";
+  assert.equal(app.get("rows").children[0].children.at(-3).textContent,"Iran: No response | Other: Responding · 55 ms");
+  app.get("node-select").value="node:3";
   app.get("node-select").listeners.change();
-  assert.equal(app.get("rows").children[0].children.at(-3).textContent,"Responding · 55 ms");
+  assert.equal(app.get("rows").children[0].children.at(-3).textContent,"Other: Responding · 55 ms");
+});
+
+test("admin quick filters include all Iran nodes and allow a named node filter", async () => {
+  const app = await loadApp();
+  app.set("fixtures", [
+    {...row(1,"DE"),status:"healthy",latency_ms:20,node_results:{"2":{status:"healthy",latency_ms:15}}},
+    {...row(2,"US"),status:"healthy",latency_ms:30,node_results:{"2":{status:"failed"},"3":{status:"healthy",latency_ms:10}}},
+    {...row(3,"FR"),status:"failed",node_results:{}}
+  ]);
+  app.set("testNodes", [{id:2,name:"Tehran",location:"iran"},{id:3,name:"Shiraz",location:"iran"},{id:4,name:"Outside",location:"other"}]);
+  app.run("records=fixtures; updateNodes(testNodes); filterCache=null; render()");
+  app.get("quick-main").listeners.click();
+  assert.equal(app.run("filtered().map(row=>row.id).join(',')"),"1,2");
+  assert.equal(app.get("quick-main")["aria-pressed"],"true");
+  app.get("quick-node").listeners.click();
+  assert.equal(app.run("filtered().map(row=>row.id).join(',')"),"1,2");
+  app.get("node-select").value="node:3";
+  app.get("node-select").listeners.change();
+  assert.equal(app.run("filtered().map(row=>row.id).join(',')"),"2");
+  assert.equal(app.get("quick-node-label").textContent,"Connected in Iran");
+  app.get("quick-node").listeners.click();
+  assert.equal(app.run("filtered().map(row=>row.id).join(',')"),"1,2");
+  app.get("quick-node").listeners.click();
+  assert.equal(app.run("filtered().length"),3);
+  app.get("quick-node").listeners.click();
+  app.get("status-filter").value="failed";
+  app.get("status-filter").listeners.change();
+  assert.equal(app.run("filtered().map(row=>row.id).join(',')"),"3");
+  assert.equal(app.get("quick-node")["aria-pressed"],"false");
 });
 
 test("node enrollment token is displayed once and cleared on close", async () => {
   const app = await loadApp();
+  let createdNode;
   app.setHandler(async (url, options) => {
-    if (url.endsWith("/api/nodes") && options.method === "POST") return response({node:{id:1,name:"Iran"},token:"sensitive-token"});
-    if (url.endsWith("/api/nodes")) return response({nodes:[{id:1,name:"Iran",last_seen:null}],certificate_fingerprint:"abc"});
+    if (url.endsWith("/api/nodes") && options.method === "POST") { createdNode = JSON.parse(options.body); return response({node:{id:1,name:"Iran"},token:"sensitive-token"}); }
+    if (url.endsWith("/api/nodes")) return response({nodes:[{id:1,name:"Iran",location:"iran",last_seen:null}],certificate_fingerprint:"abc"});
     return response(blankSnapshot);
   });
   await app.get("nodes-open").listeners.click({currentTarget:app.get("nodes-open")});
   app.get("node-name").value="Iran";
+  app.get("node-location").value="iran";
   await app.get("node-create").listeners.click({currentTarget:app.get("node-create")});
+  assert.deepEqual(createdNode, {name:"Iran",location:"iran"});
   assert.equal(app.get("node-token").value,"sensitive-token");
   assert.equal(app.get("node-token-area").hidden,false);
   app.get("node-close").listeners.click();

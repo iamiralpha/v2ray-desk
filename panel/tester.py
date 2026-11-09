@@ -156,7 +156,7 @@ def probe_gemini(port, timeout, stop=None):
 
 
 def utc_now():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def public_address(host, port):
