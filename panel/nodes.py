@@ -42,7 +42,7 @@ def node_views(db, items):
 
 
 def public_nodes(db):
-    return [dict(row) for row in db.execute("SELECT id,name,last_seen FROM nodes ORDER BY id")]
+    return [dict(row) for row in db.execute("SELECT id,name,last_seen,location FROM nodes ORDER BY id")]
 
 
 def certificate_fingerprint():
@@ -84,18 +84,34 @@ def create_nodes_blueprint(db_path, manager):
     def create():
         value = body()
         name = value.get("name")
-        if (set(value) != {"name"} or not isinstance(name, str) or not name.strip()
+        location = value.get("location", "other")
+        if (not {"name"} <= set(value) <= {"name", "location"} or not isinstance(name, str) or not name.strip()
                 or len(name) > 40 or any(ord(c) < 32 for c in name)):
             raise ConfigError("Node name must contain 1–40 characters.")
+        if not isinstance(location, str) or location not in {"iran", "other"}:
+            raise ConfigError("Invalid node location.")
         token = secrets.token_urlsafe(32)
         digest = hashlib.sha256(token.encode("ascii")).hexdigest()
         with connect(db_path) as db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] >= MAX_NODES:
                 raise ConfigError("The node limit has been reached.")
-            cursor = db.execute("INSERT INTO nodes(name,token_hash,created_at) VALUES (?,?,?)", (name.strip(), digest, now()))
-            node = {"id": cursor.lastrowid, "name": name.strip(), "last_seen": None}
+            cursor = db.execute("INSERT INTO nodes(name,token_hash,created_at,location) VALUES (?,?,?,?)", (name.strip(), digest, now(), location))
+            node = {"id": cursor.lastrowid, "name": name.strip(), "last_seen": None, "location": location}
         return jsonify(node=node, token=token), 201
+
+    @nodes.put("/api/nodes/<int:node_id>")
+    def update(node_id):
+        value = body()
+        location = value.get("location")
+        if set(value) != {"location"} or not isinstance(location, str) or location not in {"iran", "other"}:
+            raise ConfigError("Invalid node location.")
+        with manager.lock, connect(db_path) as db:
+            cursor = db.execute("UPDATE nodes SET location=? WHERE id=?", (location, node_id))
+            if not cursor.rowcount:
+                return jsonify(error="Node not found."), 404
+            manager.invalidate()
+        return jsonify(ok=True)
 
     @nodes.delete("/api/nodes/<int:node_id>")
     def delete(node_id):

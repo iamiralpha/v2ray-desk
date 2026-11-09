@@ -20,7 +20,8 @@ from .i18n import translate
 from .store import connect, initialize, save_password, setting
 from .tester import TestManager
 from .subscriptions import fetch_subscription, validate_url, reconcile, prune
-from .presets import PRESETS, PROVIDERS, SEED_MARKER, existing_sources, install_presets, url_identity
+from .presets import (ADDITIONAL_PROVIDER_IDS, ADDITIONAL_SEED_MARKER, PRESETS, PROVIDERS,
+                      SEED_MARKER, existing_sources, install_presets, url_identity)
 from .public import create_public_blueprint
 from .nodes import create_nodes_blueprint, node_views, public_nodes
 
@@ -145,7 +146,7 @@ def create_app(data_dir=None, test_config=None):
             expected = session.get("csrf", "")
             if not expected or not hmac.compare_digest(supplied, expected):
                 return jsonify(error="نشست نامعتبر است؛ صفحه را تازه کنید."), 403
-        if request.endpoint not in {"login", "static", "index", "public.configs", "public.config", "public.copy_configs"}:
+        if request.endpoint not in {"login", "static", "index", "public.configs", "public.config", "public.config_ids", "public.copy_configs"}:
             authenticated = session.get("authenticated") and session.get("auth_version") == setting(db_path, "auth_version")
             if not authenticated:
                 if request.path.startswith("/api/"):
@@ -583,11 +584,17 @@ def create_app(data_dir=None, test_config=None):
         with manager.lock:
             with connect(db_path) as db:
                 seeded = db.execute("SELECT 1 FROM settings WHERE key=?", (SEED_MARKER,)).fetchone()
+                additional_seeded = db.execute("SELECT 1 FROM settings WHERE key=?", (ADDITIONAL_SEED_MARKER,)).fetchone()
                 if not seeded:
                     inserted, enabled = install_presets(db, PRESETS, partial=True)
                     db.execute("INSERT INTO settings(key,value) VALUES (?, '1')", (SEED_MARKER,))
+                elif not additional_seeded:
+                    additions = [item for item in PRESETS if item["provider"] in ADDITIONAL_PROVIDER_IDS]
+                    inserted, enabled = install_presets(db, additions, partial=True)
                 else:
                     inserted, enabled = [], []
+                if not additional_seeded:
+                    db.execute("INSERT INTO settings(key,value) VALUES (?, '1')", (ADDITIONAL_SEED_MARKER,))
             if inserted:
                 manager.invalidate()
             queue_sync(enabled)
