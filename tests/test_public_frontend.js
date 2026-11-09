@@ -65,17 +65,58 @@ async function loadPublic({lang="en",clipboard,base=""}={}) {
 test("public visitors can view the selected node result separately from the primary result", async () => {
   const app=await loadPublic();
   const first={...row(1),node_results:{"4":{status:"failed",latency_ms:null},"5":{status:"healthy",latency_ms:46}}};
-  const next=snapshot([first],{nodes:[{id:4,name:"Iran"},{id:5,name:"Other"}]});
+  const next=snapshot([first],{nodes:[{id:4,name:"Tehran",location:"iran"},{id:5,name:"Other",location:"other"}]});
   app.setHandler(async()=>response(next));
   await app.run("load()");
   let cells=app.get("public-rows").children[0].children;
   assert.equal(cells[5].textContent,"100 ms");
-  assert.equal(cells[8].textContent,"No response");
-  app.get("public-node").value="5";
+  assert.equal(cells[8].textContent,"Tehran: No response | Other: Responding · 46 ms");
+  app.get("public-node").value="node:5";
   await app.run("load()");
   cells=app.get("public-rows").children[0].children;
   assert.equal(cells[5].textContent,"100 ms");
-  assert.equal(cells[8].textContent,"Responding · 46 ms");
+  assert.equal(cells[8].textContent,"Other: Responding · 46 ms");
+});
+
+test("quick filters query all Iran nodes and can narrow to one named node", async () => {
+  const app=await loadPublic();
+  assert.equal(app.get("public-quick-node").disabled,true);
+  const data=snapshot([row(1)],{nodes:[{id:4,name:"Tehran",location:"iran"},{id:5,name:"Shiraz",location:"iran"},{id:6,name:"Other",location:"other"}]});
+  app.setHandler(async()=>response(data));
+  await app.run("load()");
+  assert.equal(app.get("public-quick-node").disabled,false);
+  app.get("public-quick-main").listeners.click();
+  await settle();
+  let params=new URL(app.requests.at(-1).url,"https://example.test").searchParams;
+  assert.equal(params.get("status"),"healthy");
+  assert.equal(params.has("node_id"),false);
+  assert.equal(app.get("public-quick-main")["aria-pressed"],"true");
+  app.get("public-quick-node").listeners.click();
+  await settle();
+  params=new URL(app.requests.at(-1).url,"https://example.test").searchParams;
+  assert.equal(params.get("status"),"healthy");
+  assert.equal(params.get("node_region"),"iran");
+  assert.equal(params.has("node_id"),false);
+  assert.equal(app.get("public-quick-node")["aria-pressed"],"true");
+  app.run("page=2; selected.add(1)");
+  app.get("public-node").value="node:5";
+  app.get("public-node").listeners.change();
+  await settle();
+  params=new URL(app.requests.at(-1).url,"https://example.test").searchParams;
+  assert.equal(params.get("node_id"),"5");
+  assert.equal(params.get("page"),"1");
+  assert.equal(app.run("selected.size"),0);
+  assert.equal(app.get("public-quick-node-label").textContent,"Connected in Iran");
+  app.get("public-quick-node").listeners.click();
+  await settle();
+  params=new URL(app.requests.at(-1).url,"https://example.test").searchParams;
+  assert.equal(params.get("node_region"),"iran");
+  app.get("public-quick-node").listeners.click();
+  await settle();
+  params=new URL(app.requests.at(-1).url,"https://example.test").searchParams;
+  assert.equal(params.get("status"),"");
+  assert.equal(params.has("node_id"),false);
+  assert.equal(params.has("node_region"),false);
 });
 
 test("a Gemini 403 is shown as an anonymous response", async () => {
@@ -169,6 +210,31 @@ test("successful clipboard copying keeps the fallback dialog closed",async()=>{
   assert.equal(copied,"ss://sample");
   assert.equal(app.get("public-copy-dialog").open,false);
   assert.equal(app.get("public-notice").textContent,"Configuration copied.");
+});
+
+test("copy all snapshots every filtered result in bounded batches without altering selection",async()=>{
+  let copied;
+  const app=await loadPublic({clipboard:{writeText:async text=>{copied=text;}}});
+  app.set("fixture",snapshot([row(1)],{total:1205,pages:25,nodes:[{id:4,name:"Tehran",location:"iran"}]}));
+  app.run("render(fixture); $('public-node').value='iran'; $('public-status').value='healthy'; selected.add(1); syncSelection()");
+  const ids=Array.from({length:1205},(_,i)=>i+1), chunks=[];
+  app.setHandler(async url=>{
+    const parsed=new URL(url,"https://example.test");
+    if (parsed.pathname.endsWith("/ids")) {
+      assert.equal(parsed.searchParams.get("node_region"),"iran");
+      assert.equal(parsed.searchParams.get("status"),"healthy");
+      return response({ids});
+    }
+    const batch=parsed.searchParams.get("ids").split(",").map(Number);
+    chunks.push(batch);
+    return response({configs:batch.map(id=>({id,uri:`vless://sample-${id}`}))});
+  });
+  await app.get("public-copy-all").listeners.click();
+  assert.deepEqual(chunks.map(chunk=>chunk.length),[500,500,205]);
+  assert.equal(copied.split("\n").length,1205);
+  assert.equal(copied.split("\n")[1204],"vless://sample-1205");
+  assert.equal(app.run("selected.size"),1);
+  assert.equal(app.get("public-copy-all").disabled,false);
 });
 
 test("a disappeared country clears its filter and fetches page one of All",async()=>{

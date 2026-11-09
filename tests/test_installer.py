@@ -6,6 +6,10 @@ import sys
 import tarfile
 
 import pytest
+from werkzeug.security import check_password_hash
+
+import manage
+from panel.store import setting
 
 
 def extract(tmp_path, members):
@@ -44,3 +48,17 @@ def test_bootstrap_rejects_paths_outside_one_release_root(tmp_path, member):
 def test_bootstrap_rejects_symlink_members(tmp_path):
     result, _ = extract(tmp_path, [("v2ray-desk-main/link", b"", "link")])
     assert result.returncode != 0
+
+
+def test_generated_initial_password_is_shown_once_and_reinstall_keeps_it(tmp_path, monkeypatch, capsys):
+    password = "example-generated-password"
+    monkeypatch.setattr(manage.secrets, "token_urlsafe", lambda _: password)
+    monkeypatch.setattr(sys, "argv", ["manage.py", "init", "--data", str(tmp_path), "--generate", "--show-password"])
+    manage.main()
+    assert f"Panel password: {password}" in capsys.readouterr().out
+    db_path = tmp_path / "panel.sqlite3"
+    saved = setting(db_path, "password_hash")
+    assert password not in saved and check_password_hash(saved, password)
+    manage.main()
+    assert "Admin already initialized" in capsys.readouterr().out
+    assert setting(db_path, "password_hash") == saved
