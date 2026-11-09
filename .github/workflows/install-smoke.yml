@@ -105,7 +105,7 @@ jobs:
           installer="$(mktemp)"
           trap 'rm -f -- "$installer"' EXIT
           curl -fsSL https://raw.githubusercontent.com/iamiralpha/v2ray-desk/main/install-online.sh -o "$installer"
-          if ! sudo bash -c 'exec bash "$1" node </tmp/v2ray-desk-ci-node-input' _ "$installer" \
+          if ! timeout --signal=TERM 180s sudo bash -c 'exec bash "$1" node </tmp/v2ray-desk-ci-node-input' _ "$installer" \
               >/tmp/v2ray-desk-ci-node.log 2>&1; then
             sudo /opt/v2ray-desk/venv/bin/python - <<'PY'
           from pathlib import Path
