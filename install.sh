@@ -13,30 +13,61 @@ fi
 SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 APP=/opt/v2ray-desk
 DATA=/var/lib/v2ray-desk
+BIND_PORT="${PANEL_BACKEND_PORT:-}"
+if [[ -z "$BIND_PORT" ]]; then
+  if [[ -f /etc/v2ray-desk/config.json ]]; then
+    BIND_PORT="$(python3 -c 'import json;print(json.load(open("/etc/v2ray-desk/config.json")).get("backend_port",18080))')"
+  else
+    BIND_PORT="$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);from admin import port_free,random_port;print(18080 if port_free(18080) else random_port())' "$SOURCE")"
+  fi
+fi
+if [[ ! "$BIND_PORT" =~ ^[0-9]{1,5}$ ]] || ((10#$BIND_PORT < 1024 || 10#$BIND_PORT > 65535)); then
+  echo "Use a backend port between 1024 and 65535."
+  exit 1
+fi
+BIND_PORT=$((10#$BIND_PORT))
 PORT="${PANEL_HTTPS_PORT:-random}"
 if [[ "$PORT" == "random" ]]; then
   if [[ -f /etc/v2ray-desk/config.json ]]; then
     PORT="$(python3 -c 'import json;print(json.load(open("/etc/v2ray-desk/config.json"))["port"])')"
   else
-    PORT="$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);from admin import random_port;print(random_port())' "$SOURCE")"
+    PORT="$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);from admin import random_port;print(random_port(exclude={int(sys.argv[2])}))' "$SOURCE" "$BIND_PORT")"
   fi
 fi
-BIND_PORT="${PANEL_BACKEND_PORT:-18080}"
 PANEL_ADDRESS="${PANEL_ADDRESS:-}"
-if [[ ! "$PORT" =~ ^[0-9]+$ || ! "$BIND_PORT" =~ ^[0-9]+$ ]] ||
-   ((PORT < 1024 || PORT > 65535 || BIND_PORT < 1024 || BIND_PORT > 65535 || PORT == BIND_PORT)); then
+if [[ ! "$PORT" =~ ^[0-9]{1,5}$ ]] || ((10#$PORT < 1024 || 10#$PORT > 65535 || 10#$PORT == BIND_PORT)); then
   echo "Use distinct ports between 1024 and 65535."
   exit 1
 fi
+PORT=$((10#$PORT))
+if [[ -z "$PANEL_ADDRESS" && -f /etc/v2ray-desk/config.json ]]; then
+  PANEL_ADDRESS="$(python3 -c 'import json;print(json.load(open("/etc/v2ray-desk/config.json")).get("address", ""))')"
+fi
 if [[ -z "$PANEL_ADDRESS" ]]; then
-  read -r -p "Server IP or domain (for the TLS certificate): " PANEL_ADDRESS
+  PANEL_ADDRESS="$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);from admin import detect_address;print(detect_address())' "$SOURCE")"
+fi
+if [[ -z "$PANEL_ADDRESS" ]]; then
+  if [[ ! -t 0 ]]; then
+    echo "Could not detect the public IP. Set PANEL_ADDRESS to the server IP or domain and retry." >&2
+    exit 1
+  fi
+  read -r -p "Could not detect the public IP. Enter the server IP or domain: " PANEL_ADDRESS
 fi
 if [[ ! "$PANEL_ADDRESS" =~ ^[a-zA-Z0-9.:-]+$ ]]; then
   echo "Invalid server IP/domain."
   exit 1
 fi
+PANEL_INITIAL_PASSWORD=""
+PANEL_PASSWORD_SHOWN=0
+show_password_on_failure() {
+  local code=$?
+  if ((code != 0)) && [[ -n "$PANEL_INITIAL_PASSWORD" && "$PANEL_PASSWORD_SHOWN" == 0 ]]; then
+    printf '\nInstallation did not finish. The new admin password was already created:\nPanel password: %s\n' "$PANEL_INITIAL_PASSWORD" >&2
+  fi
+}
+trap show_password_on_failure EXIT
 if [[ ! -f /etc/systemd/system/v2ray-desk.service ]]; then
-  if ss -ltnH | awk '{print $4}' | grep -Eq ":($PORT|$BIND_PORT)$"; then
+  if ! python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);from admin import port_free;sys.exit(0 if port_free(int(sys.argv[2])) and port_free(int(sys.argv[3])) else 1)' "$SOURCE" "$PORT" "$BIND_PORT"; then
     echo "A selected port is already in use. Choose PANEL_HTTPS_PORT and PANEL_BACKEND_PORT."
     exit 1
   fi
@@ -83,11 +114,21 @@ if [[ "${PANEL_XRAY_PREINSTALLED:-0}" != "1" ]]; then
 fi
 "$APP/bin/xray" version
 if [[ "${PANEL_SKIP_INIT:-0}" != "1" ]]; then
-  MODE="${PANEL_PASSWORD_MODE:-}"
-  if [[ -z "$MODE" ]]; then read -r -p "Password mode [auto/manual; default auto]: " MODE; fi
+  MODE="${PANEL_PASSWORD_MODE:-auto}"
+  if [[ "$MODE" != auto && "$MODE" != manual ]]; then
+    echo "PANEL_PASSWORD_MODE must be auto or manual." >&2
+    exit 1
+  fi
   FLAGS=(--show-password)
-  if [[ "$MODE" != "manual" ]]; then FLAGS+=(--generate); fi
-  runuser -u v2ray-desk -- "$APP/venv/bin/python" "$APP/manage.py" init --data "$DATA" "${FLAGS[@]}"
+  if [[ "$MODE" == auto ]]; then FLAGS+=(--generate); fi
+  INIT_OUTPUT="$(runuser -u v2ray-desk -- "$APP/venv/bin/python" "$APP/manage.py" init --data "$DATA" "${FLAGS[@]}")"
+  while IFS= read -r line; do
+    case "$line" in
+      'Panel password: '*) PANEL_INITIAL_PASSWORD="${line#Panel password: }" ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <<< "$INIT_OUTPUT"
+  unset INIT_OUTPUT line
 fi
 install -d -m 0700 /etc/v2ray-desk
 if [[ ! -f /etc/v2ray-desk/cert.pem ]]; then
@@ -154,7 +195,20 @@ if [[ "${PANEL_SKIP_START:-0}" != "1" ]]; then
 fi
 systemctl enable --now nginx
 systemctl reload nginx
+if command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status | grep -q '^Status: active'; then
+  if ! ufw allow "$PORT/tcp"; then
+    echo "Could not add the UFW rule; allow TCP $PORT manually." >&2
+  fi
+fi
+printf '\n========================================\n  V2Ray Desk installation complete\n========================================\n'
 "$APP/venv/bin/python" "$APP/admin.py" info
 echo "A self-signed TLS certificate is installed. Verify its fingerprint before trusting it."
 openssl x509 -in /etc/v2ray-desk/cert.pem -noout -fingerprint -sha256
-echo "If a firewall is active, allow TCP $PORT. Existing firewall rules were not changed."
+echo "If your provider has a firewall, allow TCP $PORT there."
+if [[ -n "$PANEL_INITIAL_PASSWORD" ]]; then
+  printf 'Panel password: %s\n' "$PANEL_INITIAL_PASSWORD"
+  PANEL_PASSWORD_SHOWN=1
+else
+  echo "Panel password: unchanged (existing passwords cannot be displayed)."
+fi
+echo "SSH management menu: sudo v2ray-desk"
